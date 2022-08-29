@@ -1,4 +1,4 @@
-:: CodeProject SenseAI Analysis services (DeepStack module) startup script for Windows
+:: CodeProject.AI Analysis services (DeepStack module) startup script for Windows
 ::
 :: Usage:
 ::   start.bat
@@ -27,11 +27,6 @@ if "%1" == "--embedded" (
 :: Get some common env vars
 set APPDIR=%cd%
 
-:: Python 3.7
-pushd ".\bin\!platform!\Python37\venv\" >nul
-set VIRTUAL_ENV=%cd%
-popd >nul
-
 :: ===============================================================================================
 :: 1. Load environment variables
 
@@ -42,27 +37,27 @@ popd >nul
     echo Setting Environment variables...
 
     REM API server
-    set PORT=5000
+    set CPAI_PORT=5000
 
     REM Text module
     set NLTK_DATA=!APPDIR!\TextSummary\nltk_data
 
     REM Deepstack stuff
-    set DATA_DIR=!APPDIR!\DeepStack\datastore
-    set TEMP_PATH=!APPDIR!\DeepStack\tempstore
-    set MODELS_DIR=!APPDIR!\DeepStack\assets
-    set PROFILE=desktop_cpu
-    set CUDA_MODE=False
+    set DATA_DIR=!APPDIR!\Vision\datastore
+    set TEMP_PATH=!APPDIR!\Vision\tempstore
+    set MODELS_DIR=!APPDIR!\Vision\assets
+    set PROFILE=desktop_gpu
+    set USE_CUDA=True
     set MODE=Medium
 :: )
 
 if "%verbosity%" == "info" (
     echo:
-    echo PORT      = !PORT!
+    echo CPAI_PORT = !CPAI_PORT!
     echo APPDIR    = !APPDIR!
     echo NLTK_DATA = !NLTK_DATA!
     echo PROFILE   = !PROFILE!
-    echo CUDA_MODE = !CUDA_MODE!
+    echo USE_CUDA =  !USE_CUDA!
     echo DATA_DIR  = !DATA_DIR!
     echo TEMP_PATH = !TEMP_PATH!
     echo MODE      = !MODE!
@@ -74,11 +69,16 @@ if "%verbosity%" == "info" (
 echo:
 echo Starting Analysis Services...
 
-START "CodeProject SenseAI" /B /i "!VIRTUAL_ENV!\Scripts\python" "!APPDIR!\TextSummary\textsummary.py"
+:: Python 3.7
+set python37Path=!APPDIR!\src\AnalysisLayer\bin\windows\Python37\venv\Scripts\Python
+set python39Path=!APPDIR!\src\AnalysisLayer\bin\windows\Python39\venv\Scripts\Python
 
-START "CodeProject SenseAI" /B /i "!VIRTUAL_ENV!\Scripts\python" "!APPDIR!\DeepStack\intelligencelayer\detection.py"
-START "CodeProject SenseAI" /B /i "!VIRTUAL_ENV!\Scripts\python" "!APPDIR!\DeepStack\intelligencelayer\face.py"
-START "CodeProject SenseAI" /B /i "!VIRTUAL_ENV!\Scripts\python" "!APPDIR!\DeepStack\intelligencelayer\scene.py"
+START "CodeProject.AI" /B /i "!python39Path!" "!APPDIR!\TextSummary\textsummary.py"
+START "CodeProject.AI" /B /i "!python39Path!" "!APPDIR!\BackgroundRemover\rembg_adapter.py"
+
+START "CodeProject.AI" /B /i "!python37Path!" "!APPDIR!\Vision\intelligencelayer\detection.py"
+START "CodeProject.AI" /B /i "!python37Path!" "!APPDIR!\Vision\intelligencelayer\face.py"
+START "CodeProject.AI" /B /i "!python37Path!" "!APPDIR!\Vision\intelligencelayer\scene.py"
 
 :: Wait forever. We need these processes to stay alive
 if "%embedded%" == "false" (

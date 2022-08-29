@@ -1,7 +1,9 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.Runtime.Serialization;
 using System.Text.Json.Serialization;
 
-namespace CodeProject.SenseAI.API.Common
+namespace CodeProject.AI.API.Common
 {
 #pragma warning disable IDE1006 // Naming Styles
 
@@ -15,7 +17,6 @@ namespace CodeProject.SenseAI.API.Common
         /// </summary>
         [JsonPropertyOrder(-5)]
         public bool success { get; set; } = false;
-
     }
 
     public class SuccessResponse : ResponseBase
@@ -62,12 +63,81 @@ namespace CodeProject.SenseAI.API.Common
         }
     }
 
-    /// <summary>
-    /// The Response when requesting the list of log entries
-    /// </summary>
-    public class LogListResponse : SuccessResponse
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public enum ProcessStatusType
     {
-        public LogEntry[]? entries { get; set; }
+        [EnumMember(Value = "Unknown")]
+        Unknown = 0,
+
+        [EnumMember(Value = "NotEnabled")]
+        NotEnabled,
+
+        [EnumMember(Value = "Enabled")]
+        Enabled,
+
+        [EnumMember(Value = "Starting")]
+        Starting,
+
+        [EnumMember(Value = "Started")]
+        Started,
+
+        [EnumMember(Value = "NotStarted")]
+        NotStarted,
+
+        [EnumMember(Value = "FailedStart")]
+        FailedStart,
+
+        [EnumMember(Value = "Crashed")]
+        Crashed,
+
+        [EnumMember(Value = "Stopped")]
+        Stopped
+    }
+
+    /// <summary>
+    /// Represents that status of a process
+    /// </summary>
+    public class ProcessStatus
+    {
+        /// <summary>
+        /// Gets or sets the module Id
+        /// </summary>
+        public string? ModuleId { get; set; }
+
+        /// <summary>
+        /// Gets or sets the module name
+        /// </summary>
+        public string? Name { get; set; }
+
+        /// <summary>
+        /// Gets or sets the UTC time the module was started
+        /// </summary>
+        public DateTime? Started { get; set; }
+
+        /// <summary>
+        /// Gets or sets the UTC time the module was last seen making a request to the backend queue
+        /// </summary>
+        public DateTime? LastSeen { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether or not the module is running
+        /// </summary>
+        public ProcessStatusType Status { get; set; } = ProcessStatusType.Unknown;
+
+        /// <summary>
+        /// Gets or sets the number of requests processed
+        /// </summary>
+        public int Processed { get; set; }
+
+        /// <summary>
+        /// Gets or sets the name of the hardware acceleration provider.
+        /// </summary>
+        public string? ExecutionProvider { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the hardware (chip) identifier
+        /// </summary>
+        public string? HardwareId { get; set; } = "CPU";
     }
 
     /// <summary>
@@ -75,7 +145,7 @@ namespace CodeProject.SenseAI.API.Common
     /// </summary>
     public class AnalysisServicesStatusResponse : SuccessResponse
     {
-        public KeyValuePair<string, bool>[]? statuses { get; set; }
+        public List<ProcessStatus>? statuses { get; set; }
     }
 
 #pragma warning restore IDE1006 // Naming Styles

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+from typing import List
 from nltk.corpus import stopwords
 from nltk.cluster.util import cosine_distance
-#import nltk
 import numpy as np
 import networkx as nx
 
@@ -33,7 +33,7 @@ class Summarize:
             # print(sentence)
             sentences.append(sentence.replace("[^a-zA-Z]", " ").split(" "))
 
-        sentences.pop() 
+        sentences.pop()
 
         return sentences
 
@@ -53,17 +53,18 @@ class Summarize:
 
         # build the vector for the second sentence
         for w in sent2:
-             vector2[all_words.index(w)] += 1
+            vector2[all_words.index(w)] += 1
 
         return 1 - cosine_distance(vector1, vector2)
 
-    def remove_stop_words(self, sentences, stopwords:[str]=None):
+    def remove_stop_words(self, sentences: List, stopwords: List = None):
+
         if stopwords is None:
             stopwords = []
+
         stripped_sentences = []
-        for sentence_index in range(len(sentences)):
+        for sentence in sentences:
             stripped_sentence = []
-            sentence = sentences[sentence_index];
 
             for word in sentence:
                 # we want to ignore case when comparing the sentences
@@ -71,20 +72,22 @@ class Summarize:
                 # and we will ignore any stop words
                 if lcword in stopwords:
                     continue
+
                 stripped_sentence.append(lcword)
 
             stripped_sentences.append(stripped_sentence)
 
         return stripped_sentences
- 
-    def build_similarity_matrix(self, sentences, stop_words):
+
+    def build_similarity_matrix(self, sentences: List, stop_words: List):
+
         # Remove the stop words once so we don't have to check
         # when evaluating each sentence multiple times.
         stripped_sentences = self.remove_stop_words(sentences, stop_words)
 
         # Create an empty similarity matrix
         similarity_matrix = np.zeros((len(stripped_sentences), len(stripped_sentences)))
- 
+
         # Optimize calculation as similarity(a,b) == similarity(b,a)
         for idx1 in range(len(stripped_sentences)):
             for idx2 in range(idx1, len(stripped_sentences)):
@@ -92,13 +95,13 @@ class Summarize:
                     continue
 
                 similarity = self.sentence_similarity(stripped_sentences[idx1],stripped_sentences[idx2])
-                similarity_matrix[idx1][idx2] = similarity 
+                similarity_matrix[idx1][idx2] = similarity
                 similarity_matrix[idx2][idx1] = similarity
 
         return similarity_matrix
 
 
-    def generate_summary(self, sentences, top_n: int = 5):
+    def generate_summary(self, sentences: List, top_n: int = 5):
 
         if (not sentences or len(sentences) == 0):
             print("No sentences provided to generate_summary()\n")
@@ -116,11 +119,11 @@ class Summarize:
         scores = nx.pagerank(sentence_similarity_graph)
 
         # Step 4 - Sort the rank and pick top sentences. Result is array of [rank, sentence]
-        ranked_sentence = sorted(((scores[i],s) for i,s in enumerate(sentences)), reverse=True)    
-        #print("Indexes of top ranked_sentence order are ", ranked_sentence)    
+        ranked_sentence = sorted(((scores[i],s) for i,s in enumerate(sentences)), reverse=True)
+        #print("Indexes of top ranked_sentence order are ", ranked_sentence)
 
         for i in range(top_n):
-          summarize_text.append(" ".join(ranked_sentence[i][1]))
+            summarize_text.append(" ".join(ranked_sentence[i][1]))
 
         # Step 5 - Output the summarize text
         summary = ". ".join(summarize_text)
@@ -129,14 +132,14 @@ class Summarize:
         return summary
 
 
-    def generate_summary_from_file(self, file_name:str, top_n: int = 5):
+    def generate_summary_from_file(self, file_name: str, top_n: int = 5):
 
         # Step 1 - Read file and split it into sentences
         sentences = self.read_article(file_name)
         return self.generate_summary(sentences, top_n)
 
 
-    def generate_summary_from_text(self, text, top_n=5):
+    def generate_summary_from_text(self, text: str, top_n: int = 5):
 
         if (not text or text.isspace()):
             print("No text provided to generate_summary_from_text()\n")
@@ -146,7 +149,7 @@ class Summarize:
 
         # Step 1 - Split text into paragraphs
         paragraphs = text.split("\n")
-    
+
         # Step 2 - Split paragraphs into sentences
         for paragraph in paragraphs:
             sublines = paragraph.split(". ") # sentences, really.
@@ -157,5 +160,5 @@ class Summarize:
                     sentences.append(sentence)
 
         print("Number of sentences = ", len(sentences))
-    
+
         return self.generate_summary(sentences, top_n)

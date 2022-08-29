@@ -2,9 +2,10 @@
     "version": "2.0.0",
     "tasks": [
 
-        // All platforms
+        // Build individual projects ==================================================================================
+
         {
-            "label": "build-server",    // Builds ONLY the API server, and not any backend analsysis or playground apps
+            "label": "build-server",    // Builds ONLY the API server, and not any backend analsysis or explorer apps
              "type": "process",
              "group": "build",
              "command": "dotnet",
@@ -16,34 +17,6 @@
             ],
             "problemMatcher": "$msCompile"
         },
-
-        {
-            "label": "build-yolo",      // Builds ONLY the Yolo .NET analysis module
-            "type": "process",
-            "group": "build",
-            "command": "dotnet",
-            "args": [
-                "build",
-                "${workspaceFolder}/src/AnalysisLayer/CodeProject.SenseAI.AnalysisLayer.Yolo",
-                "/property:GenerateFullPaths=true",
-                "/consoleloggerparameters:NoSummary"
-            ],
-            "problemMatcher": "$msCompile"
-        },   
-
-        {
-            "label": "build-playground",      // Builds ONLY the Yolo .NET analysis module
-            "type": "process",
-            "group": "build",
-            "command": "dotnet",
-            "args": [
-                "build",
-                "${workspaceFolder}/demos/dotNet/CodeProject.SenseAI.Playground",
-                "/property:GenerateFullPaths=true",
-                "/consoleloggerparameters:NoSummary"
-            ],
-            "problemMatcher": "$msCompile"
-        },   
 
         {
             "label": "build-common",      // Builds ONLY the Yolo .NET analysis module
@@ -60,19 +33,125 @@
         },   
 
         {
+            "label": "build-yolo",      // Builds ONLY the Yolo .NET analysis module
+            "type": "process",
+            "group": "build",
+            "command": "dotnet",
+            "args": [
+                "build",
+                "${workspaceFolder}/src/AnalysisLayer/ObjectDetectionNet",
+                "/property:GenerateFullPaths=true",
+                "/consoleloggerparameters:NoSummary"
+            ],
+            "problemMatcher": "$msCompile"
+        },   
+
+        {
+            "label": "build-portraitfilter",      // Builds ONLY the .NET portrait filter  module
+            "type": "process",
+            "group": "build",
+            "command": "dotnet",
+            "args": [
+                "build",
+                "${workspaceFolder}/src/AnalysisLayer/PortraitFilter",
+                "/property:GenerateFullPaths=true",
+                "/consoleloggerparameters:NoSummary"
+            ],
+            "problemMatcher": "$msCompile"
+        },   
+
+        {
+            "label": "build-sentimentanalysis",      // Builds ONLY the the .NET sentiment analysis module
+            "type": "process",
+            "group": "build",
+            "command": "dotnet",
+            "args": [
+                "build",
+                "${workspaceFolder}/src/AnalysisLayer/SentimentAnalysis",
+                "/property:GenerateFullPaths=true",
+                "/consoleloggerparameters:NoSummary"
+            ],
+            "problemMatcher": "$msCompile"
+        },   
+
+        {
+            "label": "build-explorer",      // Builds ONLY the Yolo .NET demo explorer
+            "type": "process",
+            "group": "build",
+            "command": "dotnet",
+            "args": [
+                "build",
+                "${workspaceFolder}/demos/dotNet/CodeProject.AI.Explorer",
+                "/property:GenerateFullPaths=true",
+                "/consoleloggerparameters:NoSummary"
+            ],
+            "problemMatcher": "$msCompile"
+        },   
+
+        {
+            "label": "build-tests",      // Builds ONLY the .NET unit tests
+            "type": "process",
+            "group": "build",
+            "command": "dotnet",
+            "args": [
+                "build",
+                "${workspaceFolder}/tests/QueueServiceTests",
+                "/property:GenerateFullPaths=true",
+                "/consoleloggerparameters:NoSummary"
+            ],
+            "problemMatcher": "$msCompile"
+        },   
+
+        {
+            "label": "build-all-linux",         // Builds all projects that can be built for Linux (ie not any Windows Forms apps)
+            "group": "build",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "build-server",
+                "build-analysisservices",
+				"build-tests"
+            ]
+        },
+
+        {
+            "label": "build-all-win",         // Builds all projects that can be built for Windows (ie everything)
+            "group": "build",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "build-server",
+                "build-analysisservices",
+                "build-explorer",
+				"build-tests"
+            ]
+        },
+
+        {
+            "label": "build-analysisservices", 
+            "group": "build",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "build-yolo",
+                "build-portraitfilter",
+                "build-sentimentanalysis",
+            ]
+        },
+
+        // Launch apps ================================================================================================
+
+        {
             "label": "start-api",       // Starts the API server, which in turn will start the backend analysis modules. No build is performed
             "isBackground": true,
             "type": "process",
             "group": "none",
-            "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.SenseAI.Server.exe",
+            "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.AI.Server.exe",
             "windows": {
-                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.SenseAI.Server.exe"
+                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.AI.Server.exe"
             },
             "osx": {
-                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.SenseAI.Server.dll"
+                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.AI.Server.dll"
             },
             "linux": {
-                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.SenseAI.Server.dll"
+                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.AI.Server.dll"
             },
             "args": [],
 
@@ -102,15 +181,15 @@
             "isBackground": true,
             "type": "process",
             "group": "none",
-            "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.SenseAI.Server.exe",
+            "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.AI.Server.exe",
             "windows": {
-                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.SenseAI.Server.exe"
+                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.AI.Server.exe"
             },
             "osx": {
-                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.SenseAI.Server.dll"
+                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.AI.Server.dll"
             },
             "linux": {
-                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.SenseAI.Server.dll"
+                "command": "${workspaceFolder}/src/API/Server/FrontEnd/bin/Debug/net5.0/CodeProject.AI.Server.dll"
             },
             "args": [ "--LaunchAnalysisServices=false" ],
 
@@ -135,20 +214,8 @@
             ]
         },
 
-        // Linux / macOS
         {
-            "label": "build-all-linux",         // Builds all projects that can be built for Linux (ie not any Windows Forms apps)
-            "group": "build",
-            "dependsOrder": "sequence",
-            "dependsOn": [
-                "build-common",
-                "build-yolo",
-                "build-server"
-            ]
-        },
-
-        {
-            "label": "launch-analysis-linux",   // Launches ONLY the backend Python analysis services. Allows us to debug them
+            "label": "launch-analysis",   // Launches ONLY the backend Python analysis services. Allows us to debug them
             "type": "process",
             "isBackground": true,
             "group": "none",
@@ -193,33 +260,20 @@
             "group": "none",
             "dependsOrder": "sequence",
             "dependsOn": [
-                "build-yolo",
                 "build-server",
+                "build-analysisservices",
                 "start-api"
             ]
         },
 
         {
-            "label": "pre-launch-server-linux-debug", // Builds all, then Launches only background processes, allowing Python debug 
+            "label": "pre-launch-server-debug", // Builds all, then Launches only background processes, allowing Python debug 
             "group": "none",
             "dependsOrder": "sequence",
             "dependsOn": [
-                "build-yolo",
                 "build-server",
-                "launch-analysis-linux"
-            ]
-        },
-
-        // Windows (includes Playground, which is Windows Forms)
-        {
-            "label": "build-all-win",         // Builds all projects that can be built for Linux (ie not any Windows Forms apps)
-            "group": "build",
-            "dependsOrder": "sequence",
-            "dependsOn": [
-                "build-common",
-                "build-yolo",
-                "build-server",
-                "build-playground"
+                "build-analysisservices",
+                "launch-analysis"
             ]
         },
 
@@ -234,10 +288,10 @@
         },
 
         {
-            "label": "start-playground",        // Starts the Playground Windows form app. No building or launching of API server done.
+            "label": "start-explorer",        // Starts the Explorer Windows form app. No building or launching of API server done.
             "group": "none",
             // Windows form apps only work in Windows
-            "command": "${workspaceFolder}/demos/dotNet/CodeProject.SenseAI.Playground/bin/Debug/net6.0-windows/",
+            "command": "${workspaceFolder}/demos/dotNet/CodeProject.AI.Explorer/bin/Debug/net6.0-windows/",
             "args": [],
             "type": "process",
         },

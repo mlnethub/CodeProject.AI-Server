@@ -1,5 +1,4 @@
 ﻿
-using CodeProject.SenseAI.API.Common;
 
 using Microsoft.Extensions.Options;
 
@@ -10,23 +9,34 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 
-namespace CodeProject.SenseAI.API.Server.Backend
+using CodeProject.AI.AnalysisLayer.SDK;
+using Microsoft.Extensions.Logging;
+
+namespace CodeProject.AI.API.Server.Backend
 {
     /// <summary>
     /// Manages the Concurrent Queues
     /// </summary>
     public class QueueServices
     {
-        private readonly BackendOptions _settings;
+        private readonly QueueProcessingOptions _settings;
+        private readonly ILogger _logger;
 
         // Keeping track of the queues being used.  Will be created as needed.
         private readonly ConcurrentDictionary<string, Channel<BackendRequestBase>> _queues =
                             new ConcurrentDictionary<string, Channel<BackendRequestBase>>();
         private readonly ConcurrentDictionary<string, TaskCompletionSource<string?>> _pendingResponses =
                             new ConcurrentDictionary<string, TaskCompletionSource<string?>>();
-        public QueueServices(IOptions<BackendOptions> options)
+
+        /// <summary>
+        /// Creates a new instance of the <cref="QueueServices" /> object.
+        /// </summary>
+        /// <param name="options">The queue processing options.</param>
+        public QueueServices(IOptions<QueueProcessingOptions> options,
+                             ILogger<QueueServices> logger)
         {
             _settings = options.Value;
+            _logger   = logger;
         }
 
         public bool EnsureQueueExists(string queueName)
@@ -53,7 +63,7 @@ namespace CodeProject.SenseAI.API.Server.Backend
             // that the task is not completed.
             if (!_pendingResponses.TryAdd(request.reqid, completion))
             {
-                return new BackendErrorResponse(-3, $"Unable to add pending response id = {request.reqid}.");
+                return new BackendErrorResponse(-3, $"Unable to add pending response id {request.reqid}.");
             }
 
             // setup a request timeout.
@@ -73,7 +83,7 @@ namespace CodeProject.SenseAI.API.Server.Backend
                     await queue.Writer.WriteAsync(request, theToken).ConfigureAwait(false);
 
                     if (request != null)
-                        Logger.Log($"Queued: '{request.reqtype}' request, id {request.reqid}");
+                        _logger.LogTrace($"Queued: '{request.reqtype}' request, id {request.reqid}");
                 }
                 catch (OperationCanceledException)
                 {
@@ -134,7 +144,7 @@ namespace CodeProject.SenseAI.API.Server.Backend
                 return false;
 
             completion.SetResult(responseString);
-            Logger.Log($"Response received: id {req_id}");
+            _logger.LogTrace($"Response received (id {req_id})");
 
             return true;
         }
@@ -188,7 +198,7 @@ namespace CodeProject.SenseAI.API.Server.Backend
                 {
                     request = await queue.Reader.ReadAsync(theToken).ConfigureAwait(false);
                     if (request != null)
-                        Logger.Log($"Dequeued: '{request.reqtype}' request, id {request.reqid}");
+                        _logger.LogTrace($"Dequeued '{request.reqtype}' request, id {request.reqid}");
                 }
                 catch
                 {

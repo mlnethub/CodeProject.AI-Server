@@ -1,28 +1,30 @@
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.DependencyInjection;
-using System.Collections.Generic;
-using System.Reflection;
-
-namespace CodeProject.SenseAI.API.Server.Frontend
+namespace CodeProject.AI.API.Server.Frontend
 {
     /// <summary>
     /// The Application Entry Class.
     /// </summary>
     public class Program
     {
+        static private ILogger? _logger = null;
+
         static int _port = 5000;
-        // static int _sPort = 5001;
+        // static int _sPort = 5001; - eventually for SSL
 
         /// <summary>
         /// The Application Entry Point.
@@ -32,13 +34,22 @@ namespace CodeProject.SenseAI.API.Server.Frontend
         {
             // TODO: Pull these from the correct location
             const string company = "CodeProject";
-            const string product = "SenseAI";
+            const string product = "AI";
 
-            var assembly           = Assembly.GetExecutingAssembly();
-            var assemblyName       = assembly.GetName().Name ?? String.Empty;
-            var servicePath        = assembly.Location.Remove(Assembly.GetExecutingAssembly().Location.Length - 4) + ".exe";
-            var serviceName        = assembly.GetCustomAttribute<AssemblyProductAttribute>()?.Product
-                                   ?? assemblyName.Replace(".", " ");
+            // lower cased as Linux has case sensitive file names
+            string platform   = BackendProcessRunner.Platform.ToLower();
+            string? aspNetEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+                                ?.ToLower();
+            bool inDocker     = (Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") ?? "") == "true";
+
+
+            var assembly         = Assembly.GetExecutingAssembly();
+            var assemblyName     = (assembly.GetName().Name ?? String.Empty) 
+                                 + (platform == "windows"? ".exe" : ".dll");
+            var serviceName      = assembly.GetCustomAttribute<AssemblyProductAttribute>()?.Product
+                                 ?? assemblyName.Replace(".", " ");
+            var servicePath      = Path.Combine(System.AppContext.BaseDirectory, assemblyName);
+
             var serviceDescription = assembly.GetCustomAttribute<AssemblyDescriptionAttribute>()?.Description ?? string.Empty;
 
             if (args.Length == 1)
@@ -53,29 +64,32 @@ namespace CodeProject.SenseAI.API.Server.Frontend
                     WindowsServiceInstaller.Uninstall(serviceName);
                     return;
                 }
+                else if (args[0].Equals("/Stop", StringComparison.OrdinalIgnoreCase))
+                {
+                    WindowsServiceInstaller.Stop(serviceName);
+                    return;
+                }
             }
 
-            string platform = "windows";
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-                platform = "osx";
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-                platform = "linux";
-
+            // Get a directory for the given platform that allows momdules to store persisted data
             string programDataDir     = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             string applicationDataDir = $"{programDataDir}\\{company}\\{product}".Replace('\\', Path.DirectorySeparatorChar);
-            if (platform == "osx")
-                applicationDataDir = $"~/Library/Application Support/{company}/{product}";
 
+            // .NET's suggestion for macOS isn't great. Let's do something different.
+            if (platform == "macos" || platform == "macos-arm")
+                applicationDataDir = $"/Library/Application Support/{company}/{product}";
+
+            // Store this dir in the config settings so we can get to it later.
             var inMemoryConfigData = new Dictionary<string, string> {
                 { "ApplicationDataDir", applicationDataDir }
             };
 
             bool inVScode = (Environment.GetEnvironmentVariable("RUNNING_IN_VSCODE") ?? "") == "true";
-            bool inDocker = (Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") ?? "") == "true";
+            bool reloadConfigOnChange = !inDocker;
 
-            if (inDocker)
-                platform = "docker";  // which in our case implies that we are running in Linux
-
+            // TODO: 1. Reorder the config loading so that command line is last
+            //       2. Stop appsettings being reloaded on change when in docker for the default
+            //          appsettings.json files
             IHost? host = CreateHostBuilder(args)
                        .ConfigureAppConfiguration((hostingContext, config) =>
                        {
@@ -84,41 +98,67 @@ namespace CodeProject.SenseAI.API.Server.Frontend
                            // We've had issues where the default appsettings files not being loaded.
                            if (inVScode && platform != "windows")
                            {
-                                config.AddJsonFile(Path.Combine(baseDir, "appsettings.json"),
-                                                   optional: false, reloadOnChange: true);
+                               config.AddJsonFile(Path.Combine(baseDir, "appsettings.json"),
+                                                   optional: false, reloadOnChange: reloadConfigOnChange);
+
+                               if (!string.IsNullOrWhiteSpace(aspNetEnv))
+                               {
+                                   config.AddJsonFile(Path.Combine(baseDir, $"appsettings.{aspNetEnv}.json"),
+                                                   optional: true, reloadOnChange: reloadConfigOnChange);
+                               }
                            }
 
                            config.AddJsonFile(Path.Combine(baseDir, $"appsettings.{platform}.json"),
-                                              optional: true, reloadOnChange: true);
+                                              optional: true, reloadOnChange: reloadConfigOnChange);
 
-                           // ListEnvVariables(Environment.GetEnvironmentVariables());
-
-                           string? aspNetEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+                           // Load appsettings.platform.env.json files to allow slightly more
+                           // convenience for settings on other platforms
                            if (!string.IsNullOrWhiteSpace(aspNetEnv))
                            {
-                                // We've had issues where the default appsettings files not being loaded.
-                                if (inVScode && platform != "windows")
-                                {
-                                    config.AddJsonFile(Path.Combine(baseDir, $"appsettings.{aspNetEnv}.json"),
-                                                       optional: true, reloadOnChange: true);
-                                }
-                                
                                 config.AddJsonFile(Path.Combine(baseDir, $"appsettings.{platform}.{aspNetEnv}.json"),
-                                                  optional: true, reloadOnChange: true);
+                                                  optional: true, reloadOnChange: reloadConfigOnChange);
                            }
 
+                           // This allows us to add ad-hoc settings such as ApplicationDataDir
                            config.AddInMemoryCollection(inMemoryConfigData);
-                           config.AddJsonFile(Path.Combine(applicationDataDir, InstallConfig.InstallCfgFilename),
-                                              reloadOnChange: true, optional: true);
-                           config.AddJsonFile(Path.Combine(baseDir, VersionConfig.VersionCfgFilename), 
-                                              reloadOnChange: true, optional: true);
 
+                           // Load the installconfig.json file so we have access to the install ID
+                           config.AddJsonFile(Path.Combine(applicationDataDir, InstallConfig.InstallCfgFilename),
+                                              reloadOnChange: reloadConfigOnChange, optional: true);
+
+                           // Load the version.json file so we have access to the Version info
+                           config.AddJsonFile(Path.Combine(baseDir, VersionConfig.VersionCfgFilename), 
+                                              reloadOnChange: reloadConfigOnChange, optional: true);
+
+                           // Load the modulesettings.json files to get analysis module settings
+                           LoadModulesConfiguration(config, aspNetEnv);
+
+                           // Add command line back in to force it to have full override powers.
+                           // TODO: Clear the config loaders and add them back in this section
+                           //       properly.
+                           if (args != null)
+                               config.AddCommandLine(args);
+
+                           // For debug
                            // ListConfigSources(config.Sources);
+                           // ListEnvVariables(Environment.GetEnvironmentVariables());
                        })
                        .Build()
                        ;
 
-            var logger = host.Services.GetService<ILogger<Program>>();
+            _logger = host.Services.GetService<ILogger<Program>>();
+
+            if (_logger != null)
+            {
+                _logger.LogDebug($"Operating System: {RuntimeInformation.OSDescription}");
+                _logger.LogDebug($"Architecture:     {RuntimeInformation.ProcessArchitecture}");
+                _logger.LogDebug($"App assembly:     {assemblyName}");
+                _logger.LogDebug($"App DataDir:      {applicationDataDir}");
+                _logger.LogDebug($".Net Core Env:    {aspNetEnv}");
+                _logger.LogDebug($"Platform:         {platform}");
+                _logger.LogDebug($"In Docker:        {inDocker}");
+                _logger.LogDebug($"In VS Code:       {inVScode}");
+            }
 
             Task? hostTask;
             hostTask = host.RunAsync();
@@ -130,12 +170,14 @@ namespace CodeProject.SenseAI.API.Server.Frontend
             }
             catch (Exception ex)
             {
-                logger?.LogError(ex, "Unable to open Dashboard on startup.");
+                _logger?.LogError(ex, "Unable to open Dashboard on startup.");
             }
 #endif
             try
             {
                 await hostTask;
+
+                Console.WriteLine("Shutting down");
             }
             catch (Exception ex)
             {
@@ -144,6 +186,85 @@ namespace CodeProject.SenseAI.API.Server.Frontend
                                   "Check that another instance is not running on the same port.");
                 Console.Write("Press Enter to close.");
                 Console.ReadLine();
+            }
+        }
+
+        // TODO: This does not belong here and dhould be moved in to a Modules class.
+        // Loading of the module settings should not be done as part of the startup as this means 
+        // modulesettings files can abort the Server startup.
+        // We could:
+        //      - create a separate ConfigurationBuilder
+        //      - clear the configuration sources
+        //      - add the modulesettings files as we do now
+        //      - build a configuration from this builder
+        //      - use this configuration to load the module settings
+        // The module class will have methods and properties to get the ModuleConfigs, and other
+        // things. To be done at a later date.
+        private static void LoadModulesConfiguration(IConfigurationBuilder config, string? aspNetEnv)
+        {
+            bool reloadOnChange = (Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") ?? "") != "true";
+
+            IConfiguration configuration = config.Build();
+            var options                  = configuration.GetSection("FrontEndOptions");
+            string? rootPath             = options["ROOT_PATH"];
+            string? modulesPath          = options["MODULES_PATH"];
+
+            // Get the Modules Path
+            rootPath = BackendProcessRunner.GetRootPath(rootPath);
+
+            if (string.IsNullOrWhiteSpace(rootPath))
+            {
+                Console.WriteLine("No root path provided");
+                return;
+            }
+
+            if (!Directory.Exists(rootPath))
+            {
+                Console.WriteLine($"The provided root path '{rootPath}' doesn't exist");
+                return;
+            }
+
+            modulesPath = modulesPath.Replace("%ROOT_PATH%", rootPath);
+            modulesPath = modulesPath.Replace('\\', Path.DirectorySeparatorChar);
+            modulesPath = Path.GetFullPath(modulesPath);
+
+            if (string.IsNullOrWhiteSpace(modulesPath))
+            {
+                Console.WriteLine("No modules path provided");
+                return;
+            }
+
+            if (!Directory.Exists(modulesPath))
+            {
+                Console.WriteLine($"The provided modules path '{modulesPath}' doesn't exist");
+                return;
+            }
+
+            string platform = BackendProcessRunner.Platform.ToLower();
+            aspNetEnv = aspNetEnv?.ToLower();
+
+            // Get the Modules Directories
+            // Be careful of the order.
+            var directories = Directory.GetDirectories(modulesPath);
+            foreach (string? directory in directories)
+            {
+                config.AddJsonFile(Path.Combine(directory, "modulesettings.json"),
+                                   optional: true, reloadOnChange: reloadOnChange);
+
+                if (!string.IsNullOrEmpty(aspNetEnv))
+                {
+                    config.AddJsonFile(Path.Combine(directory, $"modulesettings.{aspNetEnv}.json"),
+                                       optional: true, reloadOnChange: reloadOnChange);
+                }
+
+                config.AddJsonFile(Path.Combine(directory, $"modulesettings.{platform}.json"),
+                                    optional: true, reloadOnChange: reloadOnChange);
+
+                if (!string.IsNullOrEmpty(aspNetEnv))
+                {
+                    config.AddJsonFile(Path.Combine(directory, $"modulesettings.{platform}.{aspNetEnv}.json"),
+                                      optional: true, reloadOnChange: reloadOnChange);
+                }
             }
         }
 
@@ -177,12 +298,18 @@ namespace CodeProject.SenseAI.API.Server.Frontend
                             .UseStartup<Startup>();
 
                             // Keep things clean and simple for now
-                            webBuilder.ConfigureLogging(logging =>
+                            webBuilder.ConfigureLogging(builder =>
                             {
-                                logging.ClearProviders()
+                                builder.ClearProviders()
                                        .AddFilter("Microsoft", LogLevel.Warning)
                                        .AddFilter("System", LogLevel.Warning)
-                                       .AddConsole();
+                                       .AddServerLogger(configuration =>
+                                       {
+                                            // Replace warning value from appsettings.json of "Cyan"
+                                            // configuration.LogLevels[LogLevel.Warning] = ConsoleColor.DarkCyan;
+                                            // Replace warning value from appsettings.json of "Red"
+                                            // configuration.LogLevels[LogLevel.Error] = ConsoleColor.DarkRed;
+                                        });
                             });
 
                     // Or if we want to do this manually...
@@ -193,10 +320,10 @@ namespace CodeProject.SenseAI.API.Server.Frontend
         private static int GetServerPort(WebHostBuilderContext hostbuilderContext)
         {
             IConfiguration config = hostbuilderContext.Configuration;
-            int port = config.GetValue<int>("PORT", -1);
 
+            int port = config.GetValue("CPAI_PORT", -1);
             if (port < 0)
-                port = config.GetValue<int>("FrontEndOptions:BackendEnvironmentVariables:PORT", -1);
+                port = config.GetValue("FrontEndOptions:EnvironmentVariables:CPAI_PORT", -1);  // TODO: PORT_CLIENT
 
             if (port < 0)
             {
@@ -206,7 +333,7 @@ namespace CodeProject.SenseAI.API.Server.Frontend
                     if (!int.TryParse(urls.Split(':').Last().Trim('/'), out port))
                         port = _port;
 
-                    config["PORT"] = port.ToString();
+                    config["CPAI_PORT"] = port.ToString();
                 }
             }
 
@@ -287,5 +414,3 @@ namespace CodeProject.SenseAI.API.Server.Frontend
         }
     }
 }
-
-

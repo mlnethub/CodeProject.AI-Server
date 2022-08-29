@@ -1,0 +1,16 @@
+{
+  "Modules": {
+    "FaceProcessing": {
+      "Runtime": "python38",
+      "EnvironmentVariables": {
+        "USE_CUDA": "false"
+      }
+    },
+    "SceneClassification": {
+      "Runtime": "python38"
+    },
+    "VisionObjectDetection": {
+      "Runtime": "python38"
+    }
+  }
+}
