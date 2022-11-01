@@ -47,12 +47,15 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
         public async Task<OkObjectResult> GetQueue([FromRoute] string name,
                                                    [FromQuery] string moduleId,
-                                                   [FromQuery] string executionProvider,
+                                                   [FromQuery] string? executionProvider,
                                                    CancellationToken token)
         {
-            UpdateProcessStatus(moduleId, executionProvider: executionProvider);
 
             BackendRequestBase? response = await _queueService.DequeueRequestAsync(name, token);
+
+            UpdateProcessStatus(moduleId, executionProvider: executionProvider,
+                                shuttingDown: response?.reqtype?.ToLower() == "quit");
+
             return new OkObjectResult(response);
         }
 
@@ -88,7 +91,7 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         }
 
         private void UpdateProcessStatus(string moduleId, bool incrementProcessCount = false,
-                                         string? executionProvider = null)
+                                         string? executionProvider = null, bool shuttingDown = false)
         {
             if (string.IsNullOrEmpty(moduleId))
                 return;
@@ -101,30 +104,32 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
             if (backend is null)
                 return;
 
-            if (backend.StartupProcesses.ContainsKey(moduleId))
+            if (backend.Modules.ContainsKey(moduleId))
             {
                 ProcessStatus status = backend.ProcessStatuses[moduleId];
-                status.Status   = ProcessStatusType.Started;
-                status.LastSeen = DateTime.UtcNow;
+                if (status.Status != ProcessStatusType.Stopping)
+                    status.Status = shuttingDown? ProcessStatusType.Stopping : ProcessStatusType.Started;
+                status.Started ??= DateTime.UtcNow;
+                status.LastSeen  = DateTime.UtcNow;
 
                 if (incrementProcessCount)
-                    status.Processed++;
+                    status.IncrementProcessedCount();
 
                 if (string.IsNullOrWhiteSpace(executionProvider))
                 {
-                    status.HardwareId        = "CPU";
+                    status.HardwareType      = "CPU";
                     status.ExecutionProvider = string.Empty;
                 }
                 // Note that executionProvider will be "CPU" if not using a GPU enabled OnnxRuntime 
                 //  or the GPU for the runtime is not available.
                 else if (string.Compare(executionProvider, "CPU", true) == 0)
                 {
-                    status.HardwareId        = "CPU";
+                    status.HardwareType      = "CPU";
                     status.ExecutionProvider = string.Empty;
                 }
                 else
                 {
-                    status.HardwareId        = "GPU";
+                    status.HardwareType      = "GPU";
                     status.ExecutionProvider = executionProvider;
                 }
             }

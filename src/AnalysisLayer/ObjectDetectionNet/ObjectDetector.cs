@@ -9,14 +9,13 @@ using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 
 using SkiaSharp;
-using SkiaSharp.Views.Desktop;
 using Yolov5Net.Scorer;
 using Yolov5Net.Scorer.Models;
 
 using CodeProject.AI.AnalysisLayer.SDK;
 using System.Linq;
 
-namespace CodeProject.AI.Analysis.Yolo
+namespace CodeProject.AI.AnalysisLayer.ObjectDetection.Yolo
 {
     /// <summary>
     /// An Object Detection Prediction.
@@ -48,9 +47,9 @@ namespace CodeProject.AI.Analysis.Yolo
         public string ExecutionProvider { get; set; } = "CPU";
 
         /// <summary>
-        /// Gets or sets the hardware ID.
+        /// Gets or sets the hardware type (CPU or GPU).
         /// </summary>
-        public string HardwareId { get; set; } = "CPU";
+        public string HardwareType { get; set; } = "CPU";
 
         public ObjectDetector(IConfiguration config, IHostEnvironment env, ILogger<ObjectDetector> logger)
         {
@@ -58,17 +57,14 @@ namespace CodeProject.AI.Analysis.Yolo
 
             string path = Directory.GetCurrentDirectory(); // AppContext.BaseDirectory;
 
-            // TODO: MODE is actually meant to be resolution, not model size. PROFILE sets the
-            //       model size. For CustomDetection we've switched to MODEL_SIZE and RESOLUTION,
-            //       but we've kept this here for compatibility with Blue Iris and Home Assist that
-            //       have DeepStack integrations.
-            string mode = config.GetValue<string>("MODE");
+            string mode = config.GetValue<string>("MODEL_SIZE");
             string modelPath = (mode ?? string.Empty.ToLower()) switch
             {
-                "low"    => "assets/yolov5n.onnx",
-                "high"   => "assets/yolov5m.onnx",
+                "large"  => "assets/yolov5m.onnx",
                 "medium" => "assets/yolov5s.onnx",
-                _        => "assets/yolov5m.onnx"
+                "small"  => "assets/yolov5n.onnx",
+                "tiny"   => "assets/yolov5n.onnx",
+                _        => "assets/yolov5s.onnx"
             };
 
             try
@@ -90,7 +86,7 @@ namespace CodeProject.AI.Analysis.Yolo
                         _scorer = new YoloScorer<YoloCocoP5Model>(modelFilePath);
 
                         ExecutionProvider = "CPU";
-                        HardwareId        = "CPU";
+                        HardwareType      = "CPU";
                     }
                 }
                 else
@@ -106,9 +102,8 @@ namespace CodeProject.AI.Analysis.Yolo
         {
             var sessionOpts = new SessionOptions();
 
-            bool useGPU = (Environment.GetEnvironmentVariable("USE_CUDA") ?? "false").ToLower() == "true"
-                       || (Environment.GetEnvironmentVariable("USE_GPU") ?? "false").ToLower() == "true";
-            if (useGPU)
+            bool supportGPU = (Environment.GetEnvironmentVariable("CPAI_MODULE_SUPPORT_GPU") ?? "false").ToLower() == "true";
+            if (supportGPU)
             {
                 string[]? providers = null;
                 try
@@ -127,7 +122,7 @@ namespace CodeProject.AI.Analysis.Yolo
                         sessionOpts.AppendExecutionProvider_CUDA();
 
                         ExecutionProvider = "CUDA";
-                        HardwareId        = "GPU";
+                        HardwareType      = "GPU";
                     }
                     catch
                     {
@@ -145,7 +140,7 @@ namespace CodeProject.AI.Analysis.Yolo
                         //sessionOpts.ExecutionMode = ExecutionMode.ORT_PARALLEL;
 
                         ExecutionProvider = "OpenVINO";
-                        HardwareId        = "GPU";
+                        HardwareType      = "GPU";
                     }
                     catch
                     {
@@ -164,7 +159,7 @@ namespace CodeProject.AI.Analysis.Yolo
                         sessionOpts.GraphOptimizationLevel = GraphOptimizationLevel.ORT_DISABLE_ALL;
 
                         ExecutionProvider = "DirectML";
-                        HardwareId        = "GPU";
+                        HardwareType      = "GPU";
                     }
                     catch
                     {
@@ -188,7 +183,7 @@ namespace CodeProject.AI.Analysis.Yolo
             if (!fi.Exists)
                 return null;
 
-            using Image? image = GetImage(filename);
+            using SKImage? image = GetImage(filename);
             List<YoloPrediction>? predictions = Predict(image);
 
             return predictions;
@@ -199,7 +194,7 @@ namespace CodeProject.AI.Analysis.Yolo
         /// </summary>
         /// <param name="image"></param>
         /// <returns>The predicted objects with bounding boxes and confidences.</returns>
-        public List<YoloPrediction>? Predict(Image? image)
+        public List<YoloPrediction>? Predict(SKImage? image)
         {
             if (image == null)
                 return null;
@@ -242,23 +237,23 @@ namespace CodeProject.AI.Analysis.Yolo
         /// <param name="filename">The file name.</param>
         /// <returns>The Bitmap, or null.</returns>
         /// <remarks>SkiSharp handles more image formats than System.Drawing.</remarks>
-        private Image? GetImage(string filename)
+        private SKImage? GetImage(string filename)
         {
             // TODO: Add error handling and port this to Maui
             var skiaImage = SKImage.FromEncodedData(filename);
             if (skiaImage is null)
                 return null;
 
-            return skiaImage.ToBitmap();
+            return skiaImage; //.ToBitmap();
         }
 
-        private Image? GetImage(byte[] imageData)
+        private SKImage? GetImage(byte[] imageData)
         {
             var skiaImage = SKImage.FromEncodedData(imageData);
             if (skiaImage is null)
                 return null;
 
-            return skiaImage.ToBitmap();
+            return skiaImage; //.ToBitmap();
         }
     }
 }

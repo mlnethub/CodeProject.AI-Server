@@ -1,5 +1,7 @@
-﻿using System.Linq;
+﻿using System;
+using System.Linq;
 using System.Threading.Tasks;
+using System.Text;
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -74,6 +76,46 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         }
 
         /// <summary>
+        /// Allows for a client to retrieve the current system status (GPU imfo mainly)
+        /// </summary>
+        /// <returns>A ResponseBase object.</returns>
+        [HttpGet("system-status", Name = "System Status")]
+        [Produces("application/json")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<object> GetSystemStatus()
+        {
+            var systemStatus = new StringBuilder(await SystemInfo.GetGpuInfo());
+
+            var backend = HttpContext.RequestServices.GetServices<IHostedService>()
+                                                     .OfType<BackendProcessRunner>()
+                                                     .FirstOrDefault();
+            if (backend is not null)
+            {
+                systemStatus.Insert(0, SystemInfo.GetSystemInfo() + Environment.NewLine + Environment.NewLine);
+
+                var environmentVariables = backend?.GlobalEnvironmentVariables;
+                if (environmentVariables is not null)
+                {
+                    systemStatus.AppendLine();
+                    systemStatus.AppendLine("Global Environment variables:");
+                    int maxLength = environmentVariables.Max(x => x.Key.ToString().Length);
+                    foreach (var envVar in environmentVariables)
+                        systemStatus.AppendLine($"  {envVar.Key.PadRight(maxLength)} = {envVar.Value}");
+                }
+            }
+
+            var response = new
+            {
+                GpuUsage          = await SystemInfo.Get3DGpuUsage(),
+                DedicatedRAMUsage = SystemInfo.GetGpuMemoryUsage(),
+                ServerStatus      = systemStatus.ToString()
+            };
+
+            return response;
+        }
+
+        /// <summary>
         /// Allows for a client to retrieve the current Paths.
         /// </summary>
         /// <returns>A ResponseBase object.</returns>
@@ -133,7 +175,9 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
                 {
                     success         = true,
                     message         = message,
-                    version         = latest,
+                    latest          = latest,
+                    current         = current,
+                    version         = latest, // To be removed
                     updateAvailable = updateAvailable
                 };
             }
@@ -160,12 +204,16 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
             if (backend.ProcessStatuses is null)
                 return new ErrorResponse("No backend processes have been registered");
 
+            foreach (ProcessStatus process in backend.ProcessStatuses.Values)
+                if (process.ModuleId is not null)
+                    process.StartupSummary = backend.GetModule(process.ModuleId)?.SettingsSummary;
+
             // List them out and return the status
             var response = new AnalysisServicesStatusResponse
             {
                 statuses = backend.ProcessStatuses
                                   .Values
-                                  .Where(module => module.Status != ProcessStatusType.NotEnabled)
+                                  // .Where(module => module.Status != ProcessStatusType.NotEnabled)
                                   .ToList()
             };
 

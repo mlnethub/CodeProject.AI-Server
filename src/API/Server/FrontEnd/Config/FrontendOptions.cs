@@ -1,8 +1,5 @@
 ﻿
-using System;
 using System.Collections.Generic;
-
-using CodeProject.AI.Server.Backend;
 
 namespace CodeProject.AI.API.Server.Frontend
 {
@@ -33,9 +30,14 @@ namespace CodeProject.AI.API.Server.Frontend
         */
 
         /// <summary>
-        /// Gets or sets the root directory that contains the backend modules.
+        /// Gets or sets the root directory that contains the pre-installed backend modules.
         /// </summary>
         public string? MODULES_PATH { get; set; }
+
+        /// <summary>
+        /// Gets or sets the root directory that contains the downloaded / sideloaded modules.
+        /// </summary>
+        public string? DOWNLOADED_MODULES_PATH { get; set; }
 
         /// <summary>
         /// Gets or sets the base directory for the python interpreters.
@@ -52,5 +54,33 @@ namespace CodeProject.AI.API.Server.Frontend
         /// Gets or sets the environment variables, common to the CodeProject.AI Server ecosystem.
         /// </summary>
         public Dictionary<string, object>? EnvironmentVariables { get; set; }
+    }
+
+    /// <summary>
+    /// Extension methods for the ModuleConfig class
+    /// </summary>
+    public static class FrontendOptionsExtensions
+    {
+        /// <summary>
+        /// Adds (and overrides if needed) the environment variables from the FrontendOptions into
+        /// the /// given dictionary.
+        /// </summary>
+        /// <param name="frontend">This frontend object</param>
+        /// <param name="environmentVars">The dictionary to which the vars will be added/updated</param>
+        public static void AddEnvironmentVariables(this FrontendOptions frontend,
+                                                   Dictionary<string, string?> environmentVars)
+        {
+            if (frontend.EnvironmentVariables is not null)
+            {
+                foreach (var entry in frontend.EnvironmentVariables)
+                {
+                    string key = entry.Key.ToUpper();
+                    if (environmentVars.ContainsKey(key))
+                        environmentVars[key] = entry.Value.ToString();
+                    else
+                        environmentVars.Add(key, entry.Value.ToString());
+                }
+            }
+        }
     }
 }

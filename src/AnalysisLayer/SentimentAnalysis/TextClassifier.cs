@@ -3,14 +3,19 @@
  * found in the https://github.com/dotnet/samples repository. The accompanying tutorial is found at 
  * https://docs.microsoft.com/en-us/dotnet/machine-learning/tutorials/text-classification-tf
  * 
- * Basically, converted the Program class Program.cs file into the TextClassifier class for general use.
+ * Basically, converted the Program class Program.cs file into the TextClassifier class for general
+ * use.
  * ------------------------------------------------------------------------------------------------- */
 
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.Transforms;
 
-namespace SentimentAnalysis
+using System;
+using System.Collections.Generic;
+using System.IO;
+
+namespace CodeProject.AI.AnalysisLayer.SentimentAnalysis
 {
     public class TextClassifier
     {
@@ -26,9 +31,9 @@ namespace SentimentAnalysis
         public string ExecutionProvider { get; set; } = "CPU";
 
         /// <summary>
-        /// Gets or sets the hardware ID.
+        /// Gets or sets the hardware type (CPU or GPU).
         /// </summary>
-        public string HardwareId { get; set; } = "CPU";
+        public string HardwareType { get; set; } = "CPU";
 
         public TextClassifier()
         {
@@ -105,7 +110,7 @@ namespace SentimentAnalysis
         /// </summary>
         public class MovieReview
         {
-            public string ReviewText { get; set; }
+            public string? ReviewText { get; set; }
         }
 
         /// <summary>
@@ -114,7 +119,7 @@ namespace SentimentAnalysis
         public class MovieReviewSentimentPrediction
         {
             [VectorType(2)]
-            public float[] Prediction { get; set; }
+            public float[]? Prediction { get; set; }
         }
 
         /// <summary>
@@ -129,7 +134,7 @@ namespace SentimentAnalysis
             /// resulting in vectors of tokens of variable lengths.
             /// </summary>
             [VectorType]
-            public int[] VariableLengthFeatures { get; set; }
+            public int[]? VariableLengthFeatures { get; set; }
         }
 
         /// <summary>
@@ -142,7 +147,7 @@ namespace SentimentAnalysis
             /// This is a fixed length vector designated by VectorType attribute.
             /// </summary>
             [VectorType(FeatureLength)]
-            public int[] Features { get; set; }
+            public int[]? Features { get; set; }
         }
     }
 }

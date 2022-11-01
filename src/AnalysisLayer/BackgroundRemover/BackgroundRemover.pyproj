@@ -4,7 +4,7 @@
 		<Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
 		<SchemaVersion>2.0</SchemaVersion>
 		<ProjectGuid>{470d3417-36a4-49a4-b719-496466fa92fc}</ProjectGuid>
-		<ProjectHome />
+		<ProjectHome/>
 		<StartupFile>rembg_adapter.py</StartupFile>
 		<SearchPath>..\SDK\Python</SearchPath>
 		<WorkingDirectory>.</WorkingDirectory>
@@ -19,13 +19,14 @@
 
 	<PropertyGroup Condition="'$(Configuration)' == 'Debug'" />
 	<PropertyGroup Condition="'$(Configuration)' == 'Release'" />
+
 	<PropertyGroup>
 		<VisualStudioVersion Condition=" '$(VisualStudioVersion)' == '' ">10.0</VisualStudioVersion>
 	</PropertyGroup>
 
 	<ItemGroup>
-		<Content Include="install.bat" />
-		<Content Include="install.sh" />
+		<Content Include="install.dev.bat" />
+		<Content Include="install.dev.sh" />
 		<Content Include="LICENSE.txt" />
 		<Content Include="modulesettings.json" />
 		<Content Include="test.html" />
@@ -65,12 +66,6 @@
 		<Folder Include="rembg\" />
 	</ItemGroup>
 
-	<!-- Unused
-	<ItemGroup>
-		<InterpreterReference Include="MSBuild|env|$(ProjectDir)BackgroundRemover.pyproj" />
-	</ItemGroup>
-	-->
-	
 	<ItemGroup>
 		<Interpreter Include="..\bin\windows\python39\venv\">
 			<Id>venv</Id>
@@ -82,5 +77,6 @@
 			<Architecture>X64</Architecture>
 		</Interpreter>
 	</ItemGroup>
+
 	<Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
 </Project>

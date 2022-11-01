@@ -59,7 +59,7 @@ detector = YOLODetector(model_path, reso, cuda=USE_CUDA)
 def main():
 
     # create a CodeProject.AI module object
-    module_runner = CodeProjectAIRunner(IMAGE_QUEUE)
+    module_runner = CodeProjectAIRunner(IMAGE_QUEUE, objectdetection_callback)
 
     # Hack for debug mode
     if module_runner.module_id == "CodeProject.AI":
@@ -67,11 +67,11 @@ def main():
         module_runner.module_name = "Vision Object Detection"
 
     if SharedOptions.USE_CUDA:
-        module_runner.hardware_id        = "GPU"
+        module_runner.hardware_type      = "GPU"
         module_runner.execution_provider = "CUDA"
 
     # Start the module
-    module_runner.start_loop(objectdetection_callback)
+    module_runner.start_loop()
 
 
 def objectdetection_callback(module_runner: CodeProjectAIRunner, data: AIRequestData) -> JSON:
@@ -109,26 +109,28 @@ def objectdetection_callback(module_runner: CodeProjectAIRunner, data: AIRequest
     except UnidentifiedImageError:
 
         err_trace = traceback.format_exc()
-        module_runner.log(LogMethod.Error | LogMethod.Cloud | LogMethod.Server,
+        message = err_trace or "The image provided was of an unknown type"
+        module_runner.log(LogMethod.Error | LogMethod.Server,
                           {
                              "filename": "detect_adapter.py",
                              "method": "do_detection",
                              "loglevel": "error",
-                             "message": err_trace, 
+                             "message": message,
                              "exception_type": "UnidentifiedImageError"
                           })
 
         return { "success": False, "error": "invalid image file", "code": 400 }
 
-    except Exception:
+    except Exception as ex:
 
-        err_trace = traceback.format_exc()
-        module_runner.log(LogMethod.Error | LogMethod.Cloud | LogMethod.Server,
+        # err_trace = traceback.format_exc()
+        message = str(ex) or f"A {ex.__class__.__name__} error occurred"
+        module_runner.log(LogMethod.Error | LogMethod.Server,
                           { 
                               "filename": "detect_adapter.py",
                               "method": "do_detection",
                               "loglevel": "error",
-                              "message": err_trace, 
+                              "message": message,
                               "exception_type": "Exception"
                           })
 
@@ -136,15 +138,5 @@ def objectdetection_callback(module_runner: CodeProjectAIRunner, data: AIRequest
 
 
 if __name__ == "__main__":
-    #main()
-    from threading import Thread
-    nThreads = os.cpu_count() -1
-    theThreads = []
-    for i in range(nThreads):
-        t = Thread(target=main)
-        theThreads.append(t)
-        t.start()
-
-    for x in theThreads:
-        x.join()
+    main()
 

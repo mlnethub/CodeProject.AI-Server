@@ -2,13 +2,13 @@
   "versionSection": {
     "versionInfo": {
       "Major": 1,
-      "Minor": 5,
-      "Patch": 6,
-      "Build": 2,
+      "Minor": 6,
+      "Patch": 7,
+      "Build": 0,
       "PreRelease": "Beta",
       "SecurityUpdate": false,
-      "File": "CodeProject.AI.Server-1.5.6.2.zip",
-      "ReleaseNotes": "Performance improvements, Docker GPU, and bug fixes, particularly around Face detection."
+      "File": "CodeProject.AI.Server-1.6.8.0.zip",
+      "ReleaseNotes": "Addressed potential resource leaks, updated version API"
     }
   }
 }

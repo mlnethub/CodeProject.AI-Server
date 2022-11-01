@@ -3,20 +3,23 @@
   // server starts. They will be started in order of appearance.
 
   "Modules": {
-    "ObjectDetection": {
-      "Activate": false,
+    "ObjectDetectionNet": {
       "Name": "Object Detection (.NET)",
+      "Version": "1.0",
+      "PreInstalled": true,
+
+      "Activate": false,
+      "Parallelism": 0, // Defaults to (#CPUs - 1)
+      "SupportGPU": true,
+      "PostStartPauseSecs": 1, // 1 if using GPU, 0 for CPU
+
       "Description": "Detects multiple objects of 80 types in an image.",
       "FilePath": "ObjectDetectionNet\\ObjectDetectionNet.exe",
       "Runtime": "execute",
-      "Platforms": [ "windows"],
-      "EnableFlags": [ "VISION-DETECTION" ],
+      "Platforms": [ "windows", "linux" ],
 
       "EnvironmentVariables": {
-        "USE_CUDA": "True",
-        // "USE_GPU":  "True",  - Alternative flag to USE_CUDA. Either works.
-        "MODE": "MEDIUM",
-        "CPAI_PORT": 5000
+        "MODEL_SIZE": "MEDIUM"
       },
 
       "RouteMaps": [
@@ -37,7 +40,9 @@
               "Name": "min_confidence",
               "Type": "Float",
               "Description": "The minimum confidence level for an object will be detected. In the range 0.0 to 1.0.",
-              "DefaultValue": "0.4"
+              "DefaultValue": 0.4,
+              "MinValue": 0.0,
+              "MaxValue": 1.0
             }
           ],
           "Outputs": [

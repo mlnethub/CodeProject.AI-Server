@@ -1,15 +1,14 @@
-﻿using SkiaSharp;
-using SkiaSharp.Views.Desktop;
+﻿using System.Text.Json.Serialization;
 
-using System.Drawing;
-using System.Text.Json.Serialization;
+using SkiaSharp;
 
 namespace CodeProject.AI.AnalysisLayer.SDK
 {
 #pragma warning disable IDE1006 // Naming Styles
 
     /// <summary>
-    /// Base class for queued requests for the backend.
+    /// Base class for queued requests for the backend. The naming here is for legacy backwards 
+    /// compatibility, and should probably be updated to something sensible.
     /// </summary>
     public class BackendRequestBase
     {
@@ -39,6 +38,7 @@ namespace CodeProject.AI.AnalysisLayer.SDK
 
         /// <summary>
         /// Instantiates a new instance of the <cref="BackendRequest" /> class.
+        /// TODO: Normalise the input. Currently reqtype == payload.command. One or the other, please.
         /// </summary>
         /// <param name="reqtype">The request type</param>
         /// <param name="payload">The request payload</param>
@@ -140,7 +140,6 @@ namespace CodeProject.AI.AnalysisLayer.SDK
         {
             return files?.ElementAtOrDefault(index);
         }
-
     }
 
     public class RequestFormFile
@@ -169,14 +168,14 @@ namespace CodeProject.AI.AnalysisLayer.SDK
         /// Converts the RequestFormFile to an Image.
         /// </summary>
         /// <returns>The image, or null if conversion fails.</returns>
-        public Image? AsImage()
+        public SKImage? AsImage()
         {
             // Using SkiaSharp as it handles more formats and mostly cross-platform.
             if (data == null)
                 return null;
 
             var skiaImage = SKImage.FromEncodedData(data);
-            return skiaImage?.ToBitmap();
+            return skiaImage;
         }
     }
 
