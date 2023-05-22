@@ -1,15 +1,13 @@
 ﻿using System;
 using System.IO;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 
-using CodeProject.AI.AnalysisLayer.SDK;
+using CodeProject.AI.SDK;
+using CodeProject.AI.SDK.Common;
 using CodeProject.AI.API.Server.Backend;
 using CodeProject.AI.API.Common;
 
@@ -22,15 +20,19 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
     [ApiController]
     public class QueueController : ControllerBase
     {
-        private readonly QueueServices _queueService;
+        private readonly QueueServices         _queueService;
+        private readonly ModuleProcessServices _moduleProcessService;
 
         /// <summary>
         /// Initializes a new instance of the QueueController class.
         /// </summary>
         /// <param name="queueService">The QueueService.</param>
-        public QueueController(QueueServices queueService)
+        /// <param name="moduleProcessService">The Module Process Service.</param>
+        public QueueController(QueueServices queueService,
+                               ModuleProcessServices moduleProcessService)
         {
-            _queueService = queueService;
+            _queueService         = queueService;
+            _moduleProcessService = moduleProcessService;
         }
 
         /// <summary>
@@ -51,12 +53,25 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
                                                    CancellationToken token)
         {
 
-            BackendRequestBase? response = await _queueService.DequeueRequestAsync(name, token);
+            BackendRequestBase? request = await _queueService.DequeueRequestAsync(name, token);
 
-            UpdateProcessStatus(moduleId, executionProvider: executionProvider,
-                                shuttingDown: response?.reqtype?.ToLower() == "quit");
+            bool shuttingDown = false;
 
-            return new OkObjectResult(response);
+            if (request != null)
+            {
+                // We're going to sniff the request to see if it's a Quit command. If so it allows us
+                // to update the status of the process. If it's a quit command then the process will
+                // shut down and no longer updating its status via the queue. This is our last chance.
+                if (request.reqtype?.ToLower() == "quit" && request is BackendRequest origRequest)
+                {
+                    string? requestModuleId = origRequest.payload?.GetValue("moduleId");
+                    shuttingDown = moduleId.EqualsIgnoreCase(requestModuleId);
+                }
+            }
+
+            UpdateProcessStatus(moduleId, incrementProcessCount: false, executionProvider, shuttingDown);
+
+            return new OkObjectResult(request);
         }
 
         /// <summary>
@@ -96,18 +111,9 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
             if (string.IsNullOrEmpty(moduleId))
                 return;
 
-            // Get the backend processor (DI won't work here due to the order things get fired up
-            // in Main.
-            var backend = HttpContext.RequestServices.GetServices<IHostedService>()
-                                                     .OfType<BackendProcessRunner>()
-                                                     .FirstOrDefault();
-            if (backend is null)
-                return;
-
-            if (backend.Modules.ContainsKey(moduleId))
+            if (_moduleProcessService.TryGetProcessStatus(moduleId, out ProcessStatus? status))
             {
-                ProcessStatus status = backend.ProcessStatuses[moduleId];
-                if (status.Status != ProcessStatusType.Stopping)
+                if (status!.Status != ProcessStatusType.Stopping)
                     status.Status = shuttingDown? ProcessStatusType.Stopping : ProcessStatusType.Started;
                 status.Started ??= DateTime.UtcNow;
                 status.LastSeen  = DateTime.UtcNow;

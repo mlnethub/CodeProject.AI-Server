@@ -1,18 +1,23 @@
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+
+using CodeProject.AI.API.Common;
+using CodeProject.AI.SDK.Common;
+
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace CodeProject.AI.API.Server.Frontend
 {
@@ -36,59 +41,78 @@ namespace CodeProject.AI.API.Server.Frontend
             const string company = "CodeProject";
             const string product = "AI";
 
+            await SystemInfo.InitializeAsync();
+
             // lower cased as Linux has case sensitive file names
-            string  platform  = BackendProcessRunner.Platform.ToLower();
-            string? aspNetEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")?.ToLower();
-            bool    inDocker  = (Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") ?? "") == "true";
+            string  os           = SystemInfo.OperatingSystem.ToLower();
+            string  architecture = SystemInfo.Architecture.ToLower();
+            string? runtimeEnv   = SystemInfo.RuntimeEnvironment == SDK.Common.RuntimeEnvironment.Development ||
+                                   SystemInfo.IsDevelopmentCode ? "development" : string.Empty;
 
-            var assembly      = Assembly.GetExecutingAssembly();
-            var assemblyName  = (assembly.GetName().Name ?? string.Empty)
-                              + (platform == "windows" ? ".exe" : ".dll");
-            var serviceName   = assembly.GetCustomAttribute<AssemblyProductAttribute>()?.Product
-                              ?? assemblyName.Replace(".", " ");
-            var servicePath   = Path.Combine(AppContext.BaseDirectory, assemblyName);
+            var assembly         = Assembly.GetExecutingAssembly();
+            var assemblyName     = (assembly.GetName().Name ?? string.Empty)
+                                 + (os == "windows" ? ".exe" : ".dll");
+            var serviceName      = assembly.GetCustomAttribute<AssemblyProductAttribute>()?.Product
+                                ?? assemblyName.Replace(".", " ");
+            var servicePath      = Path.Combine(AppContext.BaseDirectory, assemblyName);
 
-            var serviceDescription = assembly.GetCustomAttribute<AssemblyDescriptionAttribute>()?.Description ?? string.Empty;
+            var serviceDescription = assembly.GetCustomAttribute<AssemblyDescriptionAttribute>()?.Description
+                                  ?? string.Empty;
 
             if (args.Length == 1)
             {
-                if (args[0].Equals("/Install", StringComparison.OrdinalIgnoreCase))
+                if (args[0].EqualsIgnoreCase("/Install"))
                 {
                     WindowsServiceInstaller.Install(servicePath, serviceName, serviceDescription);
                     return;
                 }
-                else if (args[0].Equals("/Uninstall", StringComparison.OrdinalIgnoreCase))
+                else if (args[0].EqualsIgnoreCase("/Uninstall"))
                 {
                     WindowsServiceInstaller.Uninstall(serviceName);
+                    KillOrphanedProcesses(runtimeEnv);
                     return;
                 }
-                else if (args[0].Equals("/Stop", StringComparison.OrdinalIgnoreCase))
+                else if (args[0].EqualsIgnoreCase("/Start"))
+                {
+                    WindowsServiceInstaller.Start(serviceName);
+                    return;
+                }
+                else if (args[0].EqualsIgnoreCase("/Stop"))
                 {
                     WindowsServiceInstaller.Stop(serviceName);
+                    KillOrphanedProcesses(runtimeEnv);
                     return;
                 }
             }
 
-            // Get a directory for the given platform that allows momdules to store persisted data
+            // make sure any processes that didn't get killed on the Service shutdown get killed now.
+            KillOrphanedProcesses(runtimeEnv);
+
+            // GetProcessStatus a directory for the given platform that allows momdules to store persisted data
             string programDataDir = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             string applicationDataDir = $"{programDataDir}\\{company}\\{product}".Replace('\\', Path.DirectorySeparatorChar);
 
-            // .NET's suggestion for macOS isn't great. Let's do something different.
-            if (platform == "macos" || platform == "macos-arm")
+            // .NET's suggestion for macOS and Linux aren't great. Let's do something different.
+            if (os == "macos")
+            {
                 applicationDataDir = $"/Library/Application Support/{company}/{product}";
+            }
+            else if (os == "linux")
+            {
+                applicationDataDir = $"/etc/{company.ToLower()}/{product.ToLower()}";
+            }
 
             // Store this dir in the config settings so we can get to it later.
-            var inMemoryConfigData = new Dictionary<string, string> {
+            var inMemoryConfigData = new Dictionary<string, string?> {
                 { "ApplicationDataDir", applicationDataDir }
             };
 
-            // bool inVScode = (Environment.GetEnvironmentVariable("RUNNING_IN_VSCODE") ?? "") == "true";
-            bool reloadConfigOnChange = !inDocker;
+            bool reloadConfigOnChange = SystemInfo.ExecutionEnvironment != ExecutionEnvironment.Docker;
 
             // Setup our custom Configuration Loader pipeline and build the configuration.
             IHost? host = CreateHostBuilder(args)
-                       .ConfigureAppConfiguration(SetupConfigurationLoaders(args, platform, aspNetEnv,
-                                                                            applicationDataDir,
+                       .ConfigureAppConfiguration(SetupConfigurationLoaders(args, os, architecture,
+                                                                            runtimeEnv, applicationDataDir,
                                                                             inMemoryConfigData,
                                                                             reloadConfigOnChange))
                        .Build()
@@ -100,18 +124,21 @@ namespace CodeProject.AI.API.Server.Frontend
             {
                 string systemInfo = SystemInfo.GetSystemInfo();
                 foreach (string line in systemInfo.Split('\n'))
-                    _logger.LogInformation("** " + line.Trim());
+                    _logger.LogInformation("** " + line.TrimEnd());
 
                 _logger.LogInformation($"** App DataDir:      {applicationDataDir}");
 
-                string gpuInfo = await SystemInfo.GetGpuInfo();
-                foreach (string line in gpuInfo.Split('\n'))
-                    _logger.LogInformation(line.Trim());
+                string info = await SystemInfo.GetGpuUsageInfo();
+                foreach (string line in info.Split('\n'))
+                    _logger.LogInformation(line.TrimEnd());
+
+                info = await SystemInfo.GetVideoAdapterInfo();
+                foreach (string line in info.Split('\n'))
+                    _logger.LogInformation(line.TrimEnd());
             }
 
             Task? hostTask;
             hostTask = host.RunAsync();
-
 #if DEBUG
             try
             {
@@ -138,39 +165,112 @@ namespace CodeProject.AI.API.Server.Frontend
             }
         }
 
-        // Sets up our custom Configuration Loader Pipeline.
-        private static Action<HostBuilderContext, IConfigurationBuilder> 
-            SetupConfigurationLoaders(string[] args, string platform, string? aspNetEnv, 
-                                      string applicationDataDir,
-                                      Dictionary<string, string> inMemoryConfigData, 
-                                      bool reloadConfigOnChange)
+        private static void KillOrphanedProcesses(string? runtimeEnv)
+        {
+            if (SystemInfo.OperatingSystem.EqualsIgnoreCase("Windows"))
+            {
+                try
+                {
+                    Console.WriteLine("Stopping any orphaned Processes.");
+                    var scriptDir = Path.Combine(AppContext.BaseDirectory, 
+                                                 runtimeEnv != "development" 
+                                                            ? "..\\SDK\\Scripts\\"
+                                                            : "..\\..\\..\\..\\..\\..\\SDK\\Scripts\\");
+                    var startInfo = new ProcessStartInfo()
+                    {
+                        WindowStyle     = ProcessWindowStyle.Hidden,
+                        FileName        = Path.Combine(scriptDir,"stop_all.bat"),
+                        WorkingDirectory= Path.GetDirectoryName(scriptDir)
+                    };
+
+                    var process = Process.Start(startInfo);
+                    process?.WaitForExit();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Exception trying to stop orphaned Processes {ex.Message}");
+                }
+
+            }
+        }
+
+        /// <summary>
+        /// Sets up our custom Configuration Loader Pipeline
+        /// </summary>
+        /// <param name="args">The command line arguments</param>
+        /// <param name="os">The operating system</param>
+        /// <param name="architecture">The architecture (x86, arm64 etc)</param>
+        /// <param name="runtimeEnv">Whether this is development or production</param>
+        /// <param name="applicationDataDir">The path to the folder containing application data</param>
+        /// <param name="inMemoryConfigData">The in-memory config data</param>
+        /// <param name="reloadConfigOnChange">Whether to reload files if they are saved during runtime</param>
+        /// <returns></returns>
+        private static Action<HostBuilderContext, IConfigurationBuilder> SetupConfigurationLoaders(string[] args,
+            string os, string architecture, string? runtimeEnv, string applicationDataDir,
+            Dictionary<string, string?> inMemoryConfigData, bool reloadConfigOnChange)
         {
             return (hostingContext, config) =>
             {
                 string baseDir = AppContext.BaseDirectory;
 
-                // Remove the default sources and rebuild it.
+                // RemoveProcessStatus the default sources and rebuild it.
                 config.Sources.Clear(); 
 
                 // add in the default appsetting.json file and its variants
-                config.AddJsonFile(Path.Combine(baseDir, "appsettings.json"),
-                                    optional: false, reloadOnChange: reloadConfigOnChange);
+                // In order
+                // appsettings.json
+                // appsettings.development.json
+                // appsettings.os.json
+                // appsettings.os.development.json
+                // appsettings.os.architecture.json
+                // appsettings.os.architecture.development.json
+                // appsettings.docker.json
+                // appsettings.docker.development.json
 
-                if (!string.IsNullOrWhiteSpace(aspNetEnv))
+                string settingsFile = Path.Combine(baseDir, "appsettings.json");
+                config.AddJsonFile(settingsFile, optional: false, reloadOnChange: reloadConfigOnChange);
+
+                if (!string.IsNullOrWhiteSpace(runtimeEnv))
                 {
-                    config.AddJsonFile(Path.Combine(baseDir, $"appsettings.{aspNetEnv}.json"),
-                                    optional: true, reloadOnChange: reloadConfigOnChange);
+                    settingsFile = Path.Combine(baseDir, $"appsettings.{runtimeEnv}.json");
+                    if (File.Exists(settingsFile))                
+                        config.AddJsonFile(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
                 }
 
-                config.AddJsonFile(Path.Combine(baseDir, $"appsettings.{platform}.json"),
-                                   optional: true, reloadOnChange: reloadConfigOnChange);
+                settingsFile = Path.Combine(baseDir, $"appsettings.{os}.json");
+                if (File.Exists(settingsFile))                
+                    config.AddJsonFile(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
 
-                // Load appsettings.platform.env.json files to allow slightly more
-                // convenience for settings on other platforms
-                if (!string.IsNullOrWhiteSpace(aspNetEnv))
+                if (!string.IsNullOrWhiteSpace(runtimeEnv))
                 {
-                    config.AddJsonFile(Path.Combine(baseDir, $"appsettings.{platform}.{aspNetEnv}.json"),
-                                      optional: true, reloadOnChange: reloadConfigOnChange);
+                    settingsFile = Path.Combine(baseDir, $"appsettings.{os}.{runtimeEnv}.json");
+                    if (File.Exists(settingsFile))                
+                        config.AddJsonFile(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+                }
+
+                settingsFile = Path.Combine(baseDir, $"appsettings.{os}.{architecture}.json");
+                if (File.Exists(settingsFile))                
+                    config.AddJsonFile(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+
+                if (!string.IsNullOrWhiteSpace(runtimeEnv))
+                {
+                    settingsFile = Path.Combine(baseDir, $"appsettings.{os}.{architecture}.{runtimeEnv}.json");
+                    if (File.Exists(settingsFile))                
+                        config.AddJsonFile(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+                }
+
+                if (SystemInfo.ExecutionEnvironment == ExecutionEnvironment.Docker)
+                {
+                    settingsFile = Path.Combine(baseDir, $"appsettings.docker.json");
+                    if (File.Exists(settingsFile))                
+                        config.AddJsonFile(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+
+                    if (!string.IsNullOrWhiteSpace(runtimeEnv))
+                    {
+                        settingsFile = Path.Combine(baseDir, $"appsettings.docker.{runtimeEnv}.json");
+                        if (File.Exists(settingsFile))                
+                            config.AddJsonFile(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+                    }                        
                 }
 
                 // This allows us to add ad-hoc settings such as ApplicationDataDir
@@ -185,10 +285,10 @@ namespace CodeProject.AI.API.Server.Frontend
                                    reloadOnChange: reloadConfigOnChange, optional: true);
 
                 // Load the modulesettings.json files to get analysis module settings
-                LoadModulesConfiguration(config, aspNetEnv);
+                LoadModulesConfiguration(config, runtimeEnv);
 
                 // Load the last saved config values as set by the user
-                LoadUserOverrideConfiguration(config, applicationDataDir, aspNetEnv);
+                LoadUserOverrideConfiguration(config, applicationDataDir, runtimeEnv, reloadConfigOnChange);
 
                 // Load Envinronmnet Variables into Configuration
                 config.AddEnvironmentVariables();
@@ -214,103 +314,163 @@ namespace CodeProject.AI.API.Server.Frontend
         //      - use this configuration to load the module settings
         // The module class will have methods and properties to get the ModuleConfigs, and other
         // things. To be done at a later date.
-        private static void LoadModulesConfiguration(IConfigurationBuilder config, string? aspNetEnv)
+        private static void LoadModulesConfiguration(IConfigurationBuilder config, string? runtimeEnv)
         {
-            bool reloadOnChange = (Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") ?? "") != "true";
+            bool reloadOnChange = SystemInfo.ExecutionEnvironment != ExecutionEnvironment.Docker;
 
             IConfiguration configuration = config.Build();
-            var options                  = configuration.GetSection("FrontEndOptions");
-            string? rootPath             = options["ROOT_PATH"];
-            string? modulesPath          = options["MODULES_PATH"];
-            string? altModulesPath       = options["DOWNLOADED_MODULES_PATH"];
+            (var modulesPath, var preInstalledModulesPath) = EnsureDirectories(configuration, runtimeEnv);
 
-            // Get the Modules Path
-            rootPath = BackendProcessRunner.GetRootPath(rootPath);
+            // Scan the Modules' directories and add each modulesettings files to the config
+            if (!string.IsNullOrWhiteSpace(modulesPath) && Directory.Exists(modulesPath))
+            {
+                var directories = Directory.GetDirectories(modulesPath);
+                foreach (string? directory in directories)
+                    ModuleSettings.LoadModuleSettings(config, directory, reloadOnChange);
+            }
+
+            // Scan the pre-installed Modules' directories and add each modulesettings files
+            if (!string.IsNullOrWhiteSpace(preInstalledModulesPath) && Directory.Exists(preInstalledModulesPath))
+            {
+                var directories = Directory.GetDirectories(preInstalledModulesPath);
+                foreach (string? directory in directories)
+                    ModuleSettings.LoadModuleSettings(config, directory, reloadOnChange);
+            }
+        }
+
+        private static (string?,string?) EnsureDirectories(IConfiguration configuration, string? runtimeEnv)
+        {
+            var serverOptions = configuration.GetSection("ServerOptions");
+            string? rootPath  = serverOptions["ApplicationRootPath"];
+
+            // GetProcessStatus the Application root Path
+            rootPath = ModuleSettings.GetRootPath(rootPath);
 
             if (string.IsNullOrWhiteSpace(rootPath))
             {
                 Console.WriteLine("No root path provided");
-                return;
+                return (null, null);
             }
 
             if (!Directory.Exists(rootPath))
             {
                 Console.WriteLine($"The provided root path '{rootPath}' doesn't exist");
-                return;
+                return (null, null);
             }
 
-            modulesPath = modulesPath.Replace("%ROOT_PATH%", rootPath);
-            modulesPath = modulesPath.Replace('\\', Path.DirectorySeparatorChar);
-            modulesPath = Path.GetFullPath(modulesPath);
+            var moduleOptions                  = configuration.GetSection("ModuleOptions");
+            string? runtimesPath               = moduleOptions["RuntimesPath"];
+            string? modulesPath                = moduleOptions["ModulesPath"];
+            string? preInstalledModulesPath    = moduleOptions["PreInstalledModulesPath"];
+            string? downloadedPackagesPath     = moduleOptions["DownloadedModulePackagesPath"];
+            string? moduleInstallerScriptsPath = moduleOptions["ModuleInstallerScriptsPath"];
 
-            altModulesPath = altModulesPath.Replace("%ROOT_PATH%", rootPath);
-            altModulesPath = altModulesPath.Replace('\\', Path.DirectorySeparatorChar);
-            altModulesPath = Path.GetFullPath(altModulesPath);
+            // make sure that all the require paths are defined
+            if (string.IsNullOrWhiteSpace(runtimesPath))
+            {
+                Console.WriteLine("No runtime path provided");
+                return (null, null);
+            }
 
-            if (string.IsNullOrWhiteSpace(modulesPath) && string.IsNullOrWhiteSpace(altModulesPath))
+            if (string.IsNullOrWhiteSpace(modulesPath))
             {
                 Console.WriteLine("No modules path provided");
-                return;
+                return (null, null);
             }
 
-            if (!Directory.Exists(modulesPath) && !Directory.Exists(altModulesPath))
+            if (string.IsNullOrWhiteSpace(downloadedPackagesPath))
             {
-                Console.WriteLine($"The provided modules paths '{modulesPath}' and '{altModulesPath}' don't exist");
-                return;
+                Console.WriteLine("No downloaded module Packages path provided");
+                return (null, null);
             }
 
-            string platform = BackendProcessRunner.Platform.ToLower();
-            aspNetEnv = aspNetEnv?.ToLower();
-
-            // Get the Modules Directories
-            // Be careful of the order.
-            if (!string.IsNullOrWhiteSpace(modulesPath) && Directory.Exists(modulesPath))
+            if (string.IsNullOrWhiteSpace(moduleInstallerScriptsPath))
             {
-                var directories = Directory.GetDirectories(modulesPath);
-                foreach (string? directory in directories)
+                Console.WriteLine("No modules Installer path provided");
+                return (null, null);
+            }
+
+            // get the full paths
+            runtimesPath               = Text.FixSlashes(runtimesPath?.Replace("%ROOT_PATH%", rootPath));
+            runtimesPath               = Path.GetFullPath(runtimesPath);
+            downloadedPackagesPath     = Text.FixSlashes(downloadedPackagesPath?.Replace("%ROOT_PATH%", rootPath));
+            downloadedPackagesPath     = Path.GetFullPath(downloadedPackagesPath);
+            moduleInstallerScriptsPath = Text.FixSlashes(moduleInstallerScriptsPath?.Replace("%ROOT_PATH%", rootPath));
+            moduleInstallerScriptsPath = Path.GetFullPath(moduleInstallerScriptsPath);
+            modulesPath                = Text.FixSlashes(modulesPath?.Replace("%ROOT_PATH%", rootPath));
+            modulesPath                = Path.GetFullPath(modulesPath);
+            preInstalledModulesPath    = Text.FixSlashes(preInstalledModulesPath?.Replace("%ROOT_PATH%", rootPath));
+            preInstalledModulesPath    = Path.GetFullPath(preInstalledModulesPath);
+
+            // create the directories if the don't exist
+            if (!Directory.Exists(runtimesPath))
+            {
+                Console.WriteLine($"Creating runtimes path '{runtimesPath}'");
+                Directory.CreateDirectory(runtimesPath);
+            }
+
+            if (!Directory.Exists(downloadedPackagesPath))
+            {
+                Console.WriteLine($"Creating downloaded modules package path '{downloadedPackagesPath}'");
+                Directory.CreateDirectory(downloadedPackagesPath);
+            }
+
+            if (!Directory.Exists(moduleInstallerScriptsPath))
+            {
+                Console.WriteLine($"Creating modules installer path '{moduleInstallerScriptsPath}'");
+                Directory.CreateDirectory(moduleInstallerScriptsPath);
+            }
+
+            if (!Directory.Exists(modulesPath))
+            {
+                Console.WriteLine($"Creating modules path '{modulesPath}'");
+                Directory.CreateDirectory(modulesPath);
+            }
+
+            var srcPath = Path.Combine(rootPath, "src");
+
+            // copy over the SDK if required.
+            if (runtimeEnv?.ToLower() == "development" && !srcPath.EqualsIgnoreCase(moduleInstallerScriptsPath))
+            {
+                Console.WriteLine("Copying SDK and Setup Scripts");
+
+                File.Copy(Path.Combine(srcPath, "setup.bat"), Path.Combine(moduleInstallerScriptsPath, "setup.bat"), true);
+                File.Copy(Path.Combine(srcPath, "setup.sh"), Path.Combine(moduleInstallerScriptsPath, "setup.sh"), true);
+                CopyDirectory(Path.Combine(srcPath, "SDK"), Path.Combine(moduleInstallerScriptsPath, "SDK"),true);
+            }
+
+            return (modulesPath, preInstalledModulesPath);
+        }
+
+        private static void CopyDirectory(string sourceDir, string destinationDir, bool recursive)
+        {
+            // Get information about the source directory
+            var dir = new DirectoryInfo(sourceDir);
+
+            // Check if the source directory exists
+            if (!dir.Exists)
+                throw new DirectoryNotFoundException($"Source directory not found: {dir.FullName}");
+
+            // Cache directories before we start copying
+            DirectoryInfo[] dirs = dir.GetDirectories();
+
+            // Create the destination directory
+            Directory.CreateDirectory(destinationDir);
+
+            // Get the files in the source directory and copy to the destination directory
+            foreach (FileInfo file in dir.GetFiles())
+            {
+                string targetFilePath = Path.Combine(destinationDir, file.Name);
+                file.CopyTo(targetFilePath, true);
+            }
+
+            // If recursive and copying subdirectories, recursively call this method
+            if (recursive)
+            {
+                foreach (DirectoryInfo subDir in dirs)
                 {
-                    config.AddJsonFile(Path.Combine(directory, "modulesettings.json"),
-                                       optional: true, reloadOnChange: reloadOnChange);
-
-                    if (!string.IsNullOrEmpty(aspNetEnv))
-                    {
-                        config.AddJsonFile(Path.Combine(directory, $"modulesettings.{aspNetEnv}.json"),
-                                           optional: true, reloadOnChange: reloadOnChange);
-                    }
-
-                    config.AddJsonFile(Path.Combine(directory, $"modulesettings.{platform}.json"),
-                                        optional: true, reloadOnChange: reloadOnChange);
-
-                    if (!string.IsNullOrEmpty(aspNetEnv))
-                    {
-                        config.AddJsonFile(Path.Combine(directory, $"modulesettings.{platform}.{aspNetEnv}.json"),
-                                          optional: true, reloadOnChange: reloadOnChange);
-                    }
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(altModulesPath) && Directory.Exists(altModulesPath))
-            {
-                var directories = Directory.GetDirectories(altModulesPath);
-                foreach (string? directory in directories)
-                {
-                    config.AddJsonFile(Path.Combine(directory, "modulesettings.json"),
-                                       optional: true, reloadOnChange: reloadOnChange);
-
-                    if (!string.IsNullOrEmpty(aspNetEnv))
-                    {
-                        config.AddJsonFile(Path.Combine(directory, $"modulesettings.{aspNetEnv}.json"),
-                                           optional: true, reloadOnChange: reloadOnChange);
-                    }
-
-                    config.AddJsonFile(Path.Combine(directory, $"modulesettings.{platform}.json"),
-                                       optional: true, reloadOnChange: reloadOnChange);
-
-                    if (!string.IsNullOrEmpty(aspNetEnv))
-                    {
-                        config.AddJsonFile(Path.Combine(directory, $"modulesettings.{platform}.{aspNetEnv}.json"),
-                                           optional: true, reloadOnChange: reloadOnChange);
-                    }
+                    string newDestinationDir = Path.Combine(destinationDir, subDir.Name);
+                    CopyDirectory(subDir.FullName, newDestinationDir, true);
                 }
             }
         }
@@ -320,12 +480,12 @@ namespace CodeProject.AI.API.Server.Frontend
         /// </summary>
         /// <param name="config"></param>
         /// <param name="applicationDataDir">The directory containing the persisted user data</param>
-        /// <param name="aspNetEnv">The current ASP.NET environment (Debug or Release)</param>
+        /// <param name="runtimeEnv">The current runtime environment (production or development)</param>
+        /// <param name="reloadOnChange">Whether to reload the config files if they change</param>
         private static void LoadUserOverrideConfiguration(IConfigurationBuilder config, 
-                                                  string applicationDataDir, string? aspNetEnv)
+                                                          string applicationDataDir, 
+                                                          string? runtimeEnv, bool reloadOnChange)
         {
-            bool reloadOnChange = (Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") ?? "") != "true";
-
             if (string.IsNullOrWhiteSpace(applicationDataDir))
             {
                 Console.WriteLine("No application data directory path provided");
@@ -338,15 +498,15 @@ namespace CodeProject.AI.API.Server.Frontend
                 return;
             }
 
-            aspNetEnv = aspNetEnv?.ToLower();
+            runtimeEnv = runtimeEnv?.ToLower();
 
             // For now, we'll store ALL module settings in the same file
             config.AddJsonFile(Path.Combine(applicationDataDir, "modulesettings.json"),
                                optional: true, reloadOnChange: reloadOnChange);
 
-            if (!string.IsNullOrEmpty(aspNetEnv))
+            if (!string.IsNullOrEmpty(runtimeEnv))
             {
-                config.AddJsonFile(Path.Combine(applicationDataDir, $"modulesettings.{aspNetEnv}.json"),
+                config.AddJsonFile(Path.Combine(applicationDataDir, $"modulesettings.{runtimeEnv}.json"),
                                    optional: true, reloadOnChange: reloadOnChange);
             }
         }
@@ -368,22 +528,60 @@ namespace CodeProject.AI.API.Server.Frontend
                             webBuilder.UseShutdownTimeout(TimeSpan.FromSeconds(30));
                             webBuilder.ConfigureKestrel((hostbuilderContext, serverOptions) =>
                             {
-                                _port = GetServerPort(hostbuilderContext);
-                                serverOptions.Listen(IPAddress.IPv6Any, _port);
-                                // We always want this port.
-                                if (_port != 32168)
-                                    serverOptions.Listen(IPAddress.IPv6Any, 32168);
+                                IConfiguration config = hostbuilderContext.Configuration;
+                                bool disableLegacyPort = config.GetValue("ServerOptions:DisableLegacyPort", false);
 
-                                // Add some legacy ports
-                                if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                                _port = GetServerPort(hostbuilderContext);
+                                bool foundPort = false;
+
+                                if (IsPortAvailable(_port))
                                 {
-                                    if (_port != 5500)
-                                        serverOptions.Listen(IPAddress.IPv6Any, 5500);
+                                    serverOptions.Listen(IPAddress.IPv6Any, _port);
+                                    foundPort = true;
                                 }
-                                else
+
+                                // We always want this port.
+                                if (_port != 32168 && IsPortAvailable(32168))
                                 {
-                                    if (_port != 5000)
-                                        serverOptions.Listen(IPAddress.IPv6Any, 5000);
+                                    if (!foundPort)
+                                        _port = 32168;
+
+                                    serverOptions.Listen(IPAddress.IPv6Any, 32168);
+                                    foundPort = true;
+                                }
+
+                                if (!disableLegacyPort)
+                                {
+                                    // Add some legacy ports
+                                    if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                                    {
+                                        if (_port != 5500 && IsPortAvailable(5500))
+                                        {
+                                            if (!foundPort)
+                                                _port = 5500;
+                                        
+                                            serverOptions.Listen(IPAddress.IPv6Any, 5500);
+                                           foundPort = true;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        if (_port != 5000 && IsPortAvailable(5000))
+                                        {
+                                            if (!foundPort)
+                                                _port = 5000;
+                                        
+                                            serverOptions.Listen(IPAddress.IPv6Any, 5000);
+                                            foundPort = true;
+                                        }
+                                    }
+                                }
+
+                                if (!foundPort)
+                                {
+                                    _port = GetAvailablePort(IPAddress.IPv6Any);
+                                    serverOptions.Listen(IPAddress.IPv6Any, _port);
+                                    Console.WriteLine("Standard ports in use. Falling back to port " + _port);
                                 }
 
                                 // Add a self-signed certificate to enable HTTPS locally
@@ -415,18 +613,60 @@ namespace CodeProject.AI.API.Server.Frontend
                 });
         }
 
+        /// <summary>
+        /// Checks as to whether a given port on this machine is avaialble for use.
+        /// </summary>
+        /// <param name="port">The port number</param>
+        /// <returns>true if the port is available; false otherwise</returns>
+        private static bool IsPortAvailable(int port)
+        {
+            bool isAvailable = true;
+
+            // Evaluate current system tcp connections. This is the same information provided
+            // by the netstat command line application, just in .Net strongly-typed object
+            // form.  We will look through the list, and if our port we would like to use
+            // in our TcpClient is occupied, we will set isAvailable to false.
+            IPGlobalProperties ipGlobalProperties = IPGlobalProperties.GetIPGlobalProperties();
+            TcpConnectionInformation[] tcpConnInfoArray = ipGlobalProperties.GetActiveTcpConnections();
+
+            foreach (TcpConnectionInformation tcpi in tcpConnInfoArray)
+            {
+                if (tcpi.LocalEndPoint.Port == port)
+                {
+                    isAvailable = false;
+                    break;
+                }
+            }
+
+            return isAvailable;
+        }
+
+        /// <summary>
+        /// Gets an available port for this server
+        /// </summary>
+        /// <returns></returns>    
+        private static int GetAvailablePort(IPAddress address)
+        {
+            TcpListener listener = new TcpListener(address, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            listener.Stop();
+
+            return port;
+        }
+
         private static int GetServerPort(WebHostBuilderContext hostbuilderContext)
         {
             IConfiguration config = hostbuilderContext.Configuration;
 
             int port = config.GetValue("CPAI_PORT", -1);
             if (port < 0)
-                port = config.GetValue("FrontEndOptions:EnvironmentVariables:CPAI_PORT", -1);  // TODO: PORT_CLIENT
+                port = config.GetValue("ServerOptions:EnvironmentVariables:CPAI_PORT", -1);  // TODO: PORT_CLIENT
 
             if (port < 0)
             {
                 // urls will be a string in format <url>:port[;<url>:port_n]*;
-                string urls = config.GetValue<string>("urls");
+                string? urls = config.GetValue<string>("urls");
                 if (!string.IsNullOrWhiteSpace(urls))
                 {
                     var urlList = urls.Split(';');
@@ -489,7 +729,8 @@ namespace CodeProject.AI.API.Server.Frontend
                 }
                 else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
                 {
-                    Process.Start("sensible-browser", url);
+                    Process.Start("open", url);
+                    // Process.Start("sensible-browser", url);
                 }
             }
             catch
@@ -505,7 +746,9 @@ namespace CodeProject.AI.API.Server.Frontend
                 }
                 else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
                 {
-                    Process.Start("open", url);
+                    // Process.Start("open", url);
+                    Process.Start("sensible-browser", url);
+
                 }
                 else
                 {

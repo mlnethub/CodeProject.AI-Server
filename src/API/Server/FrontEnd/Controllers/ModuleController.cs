@@ -1,19 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
-using System.Net.Http;
-using System.Text.Json;
 using System.Threading.Tasks;
+
+using CodeProject.AI.API.Common;
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-
-using CodeProject.AI.API.Common;
 
 namespace CodeProject.AI.API.Server.Frontend.Controllers
 {
@@ -24,65 +20,123 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
     [ApiController]
     public class ModuleController : ControllerBase
     {
-        private static HttpClient? _client;
-        private readonly ILogger _logger;
-        private readonly IConfiguration _configuration;
-        private readonly FrontendOptions _frontendOptions;
+        private readonly VersionConfig    _versionConfig;
+        private readonly ModuleOptions    _moduleOptions;
+        private readonly ModuleSettings   _moduleSettings;
+        private readonly ModuleCollection _moduleCollection;
+        private readonly AiModuleInstaller  _moduleInstaller;
+        private readonly ILogger          _logger;
 
         /// <summary>
         /// Constructor
         /// </summary>
-        /// <param name="configuration">The Configuration instance</param>
-        /// <param name="options">The Frontend Options</param>
+        /// <param name="versionOptions">The server version Options</param>
+        /// <param name="moduleSettings">The module settings instance</param>
+        /// <param name="moduleOptions">The module options instance</param>
+        /// <param name="moduleCollection">The collection of modules.</param>
+        /// <param name="moduleInstaller">The module installer instance.</param>
         /// <param name="logger">The logger</param>
-        public ModuleController(IConfiguration configuration,
-                                IOptions<FrontendOptions> options,
+        public ModuleController(IOptions<VersionConfig>    versionOptions,
+                                ModuleSettings             moduleSettings,
+                                IOptions<ModuleOptions>    moduleOptions,
+                                IOptions<ModuleCollection> moduleCollection,
+                                AiModuleInstaller moduleInstaller,
                                 ILogger<LogController> logger)
         {
-            _logger = logger;
-            _configuration = configuration;
-            _frontendOptions = options.Value;
+            _versionConfig    = versionOptions.Value;
+            _moduleOptions    = moduleOptions.Value;
+            _moduleSettings   = moduleSettings;
+            _moduleInstaller  = moduleInstaller;
+            _moduleCollection = moduleCollection.Value;
+            _logger           = logger;
         }
-
 
         /// <summary>
         /// Allows for a client to list the installed backend analysis services.
+        /// </summary>
+        /// <returns>A ResponseBase object.</returns>
+        [HttpPost("upload", Name = "UploadModule")]
+        [Produces("application/json")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<ResponseBase> UploadModule()
+        {
+            try // if there are no Form values, then Request.Form throws.
+            {
+                IFormCollection form = Request.Form;
+                
+                if (string.IsNullOrWhiteSpace(_moduleOptions.InstallPassword))
+                    return CreateErrorResponse("No security credentials have been set for module uploads. Not proceeding.");
+
+                // Add any form files
+                var uploadedFile = form.Files.FirstOrDefault();
+                if (uploadedFile is null || uploadedFile.Length == 0)
+                    return CreateErrorResponse("No file was uploaded");
+
+                string? password = form["install-pwd"][0];
+                if (password is null || password != _moduleOptions.InstallPassword)
+                    return CreateErrorResponse("The supplied module upload password was incorrect. Not proceeding.");
+
+                string tempName      = Guid.NewGuid().ToString();
+                string downloadPath  = _moduleSettings.DownloadedModulePackagesPath 
+                                     + Path.DirectorySeparatorChar + tempName + ".zip";
+
+                using (Stream fileStream = new FileStream(downloadPath, FileMode.Create, FileAccess.Write))
+                {
+                    await uploadedFile.CopyToAsync(fileStream);
+                    fileStream.Close();
+                }
+
+                (bool success, string error) = await _moduleInstaller.InstallModuleAsync(downloadPath, null);
+    
+                return success? new SuccessResponse() : CreateErrorResponse("Unable install module: " + error);
+            }
+            catch (Exception ex)
+            {
+                return CreateErrorResponse("Unable to upload and install module: " + ex.Message);
+                // nothing to do here, just no Form available
+            }
+        }
+
+        /// <summary>
+        /// Allows for a client to list the installed backend analysis services. This may include
+        /// modules that can't be downloaded. They will be marked appropriately.
         /// </summary>
         /// <returns>A ResponseBase object.</returns>
         [HttpGet("list/installed", Name = "ListInstalledModules")]
         [Produces("application/json")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
-        public ResponseBase ListInstalledModules()
+        public async Task<ResponseBase> ListInstalledModules()
         {
-            // Get the backend processor (DI won't work here due to the order things get fired up
-            // in Main.
-            var backend = HttpContext.RequestServices.GetServices<IHostedService>()
-                                                     .OfType<BackendProcessRunner>()
-                                                     .FirstOrDefault();
-            if (backend is null)
-                return new ErrorResponse("Unable to locate backend services");
+            if (_moduleCollection?.Count is null || _moduleCollection.Count == 0)
+                return CreateErrorResponse("No backend modules have been registered");
 
-            if (backend.ProcessStatuses is null)
-                return new ErrorResponse("No backend processes have been registered");
+            string currentServerVersion = _versionConfig.VersionInfo!.Version;
 
-            // List them out and return the status
-            var response = new ModuleListResponse
+            var modules = _moduleCollection?.Values?
+                            .Select(module => AiModuleInstaller.ModuleDescriptionFromModuleConfig(module, true, 
+                                                                                                  currentServerVersion,
+                                                                                                  _moduleSettings.ModulesPath,
+                                                                                                  _moduleSettings.PreInstalledModulesPath))
+                            .ToList() ?? new List<ModuleDescription>();
+
+            // Mark those modules that can't be downloaded
+            List<ModuleDescription> downloadables = await _moduleInstaller.GetDownloadableModules();
+            foreach (ModuleDescription module in modules)
             {
-                modules = backend.Modules.Values.Select(module => new ModuleDescription()
-                {
-                    ModuleId  = module.ModuleId,
-                    Name      = module.Name,
-                    Platforms = module.Platforms,
-                    Version   = module.Version
-                }).ToList()
-            };
+                if (!downloadables.Any(download => download.ModuleId == module.ModuleId))
+                    module.IsDownloadable = false;                
+            }
 
-            return response;
+            return new ModuleListResponse
+            {
+                modules = modules
+            };
         }
 
         /// <summary>
-        /// Allows for a client to list of backend analysis services available for download
+        /// Allows for a client to list of backend analysis modules available for download
         /// </summary>
         /// <returns>A ResponseBase object.</returns>
         [HttpGet("list/available", Name = "ListAvailableModules")]
@@ -91,53 +145,95 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
         public async Task<ResponseBase> ListAvailableModules()
         {
-            List<ModuleDescription>? moduleList = null;
+            List<ModuleDescription> moduleList = await _moduleInstaller.GetDownloadableModules();
 
-            if (_client is null)
-                _client = new HttpClient { Timeout = new TimeSpan(0, 0, 30) };
-
-            try
-            {
-                // string moduleListUrl = _configuration.GetValue<string>("ModuleListUrl");
-                // string data = await _client.GetStringAsync(moduleListUrl);
-                string? data = await System.IO.File.ReadAllTextAsync(_frontendOptions.ROOT_PATH! + "\\modules.json");
-
-                if (!string.IsNullOrWhiteSpace(data))
-                {
-                    var options = new JsonSerializerOptions
-                    {
-                        PropertyNameCaseInsensitive = true
-                    };
-
-                    moduleList = JsonSerializer.Deserialize<List<ModuleDescription>>(data, options);
-                    if (moduleList is not null)
-                    {
-                        // A small adjustment. The version info contains the file *name* not a file
-                        // URL. We return just the name as a naive protection against man in the
-                        // middle attacks. The actual URL we send the user to will come from the
-                        // local config settings.
-                        /*
-                        if (!string.IsNullOrWhiteSpace(version.File))
-                        {
-                            string updateDownloadUrl = Configuration.GetValue<string>("UpdateDownloadUrl");
-                            version.File = updateDownloadUrl;
-                        }
-                        */
-                        // _logger.LogInformation($"Latest version available is {version.Version}");
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                _logger.LogError($"Error checking for available modules: " + e.Message);
-            }
-
-            var response = new ModuleListResponse()
+            return new ModuleListResponse()
             {
                 modules = moduleList!
             };
+        }
 
-            return response;
+        /// <summary>
+        /// Allows for a client to list the installed backend analysis modules as well as the
+        /// modules that can be downloaded and installed.
+        /// </summary>
+        /// <returns>A ResponseBase object.</returns>
+        [HttpGet("list", Name = "ListAllModules")]
+        [Produces("application/json")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<ResponseBase> ListAllModules()
+        {
+            List<ModuleDescription> downloadableModules = await _moduleInstaller.GetDownloadableModules() 
+                                                        ?? new List<ModuleDescription>();
+            
+            string currentServerVersion = _versionConfig.VersionInfo!.Version;
+
+            // Go through each module we currently have registered, and if that module doesn't 
+            // appear in the available downloads then add it to the list of all modules and
+            // ensure it's set as 'Installed'.
+            foreach (ModuleConfig? module in _moduleCollection.Values)
+            {
+                if (module?.Valid != true)
+                    continue;
+
+                ModuleDescription? installedModuleDesc = null;
+                if (downloadableModules.Count > 0)
+                    installedModuleDesc = downloadableModules.FirstOrDefault(m => m.ModuleId == module.ModuleId);
+
+                if (installedModuleDesc is null)
+                {
+                    var description = AiModuleInstaller.ModuleDescriptionFromModuleConfig(module, true,
+                                                                                          currentServerVersion,
+                                                                                          _moduleSettings.ModulesPath,
+                                                                                          _moduleSettings.PreInstalledModulesPath);
+                    description.IsDownloadable = false;  
+                    downloadableModules.Add(description);
+                }
+            };
+
+            return new ModuleListResponse()
+            {
+                modules = downloadableModules!
+            };
+        }
+
+        /// <summary>
+        /// Manages requests to install the given module.
+        /// </summary>
+        /// <param name="moduleId">The module to install</param>
+        /// <param name="version">The version of the module to install</param>
+        /// <returns>A Response Object.</returns>
+        [HttpPost("install/{moduleId}/{version}", Name = "Install Module")]
+        [Produces("application/json")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<ResponseBase> InstallModuleAsync(string moduleId, string version)
+        {
+            (bool success, string error) = await _moduleInstaller.DownloadAndInstallModuleAsync(moduleId, version);
+            
+            return success? new SuccessResponse() : CreateErrorResponse(error);
+        }
+
+        /// <summary>
+        /// Manages requests to uninstall the given module.
+        /// </summary>
+        /// <returns>A Response Object.</returns>
+        [HttpPost("uninstall/{moduleId}", Name = "Uninstall Module")]
+        [Produces("application/json")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public async Task<ResponseBase> UninstallModuleAsync(string moduleId)
+        {
+            (bool success, string error) = await _moduleInstaller.UninstallModuleAsync(moduleId);
+            
+            return success? new SuccessResponse() : CreateErrorResponse(error);
+        }
+
+        private ErrorResponse CreateErrorResponse(string message)
+        {
+            _logger.LogError(message);
+            return new ErrorResponse(message);
         }
     }
 }

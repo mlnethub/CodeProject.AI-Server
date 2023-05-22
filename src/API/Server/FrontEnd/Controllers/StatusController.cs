@@ -5,11 +5,11 @@ using System.Text;
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using Microsoft.AspNetCore.Hosting;
 
 using CodeProject.AI.API.Common;
+using CodeProject.AI.SDK.Common;
+using Microsoft.Extensions.Options;
 
 namespace CodeProject.AI.API.Server.Frontend.Controllers
 {
@@ -23,15 +23,27 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         /// <summary>
         /// Gets the version service instance.
         /// </summary>
-        public VersionService VersionService { get; }
+        private readonly ServerVersionService  _versionService;
+        private readonly ModuleSettings        _moduleSettings;
+        private readonly ModuleProcessServices _moduleProcessService;
+        private readonly ModuleCollection      _moduleCollection;
 
         /// <summary>
         /// Initializes a new instance of the StatusController class.
         /// </summary>
         /// <param name="versionService">The Version instance.</param>
-        public StatusController(VersionService versionService)
+        /// <param name="moduleSettings">The module settings instance</param>
+        /// <param name="moduleProcessService">The Module Process Services.</param>
+        /// <param name="moduleCollection">The Module Collection.</param>
+        public StatusController(ServerVersionService versionService,
+                                ModuleSettings moduleSettings,
+                                ModuleProcessServices moduleProcessService,
+                                IOptions<ModuleCollection> moduleCollection)
         {
-            VersionService = versionService;
+            _versionService       = versionService;
+            _moduleSettings       = moduleSettings;
+            _moduleProcessService = moduleProcessService;
+            _moduleCollection     = moduleCollection.Value;
         }
 
         /// <summary>
@@ -67,8 +79,8 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         {
             var response = new VersionResponse
             {
-                message = VersionService.VersionConfig.VersionInfo?.Version ?? string.Empty,
-                version = VersionService.VersionConfig.VersionInfo,
+                message = _versionService.VersionConfig.VersionInfo?.Version ?? string.Empty,
+                version = _versionService.VersionConfig.VersionInfo,
                 success = true
             };
 
@@ -85,31 +97,49 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
         public async Task<object> GetSystemStatus()
         {
-            var systemStatus = new StringBuilder(await SystemInfo.GetGpuInfo());
+            // run these in parallel as they have a Task.Delay(1000) in them.
+            var cpuUsageTask     = SystemInfo.GetCpuUsage();
+            var gpuUsageTask     = SystemInfo.GetGpuUsage();
+            var gpuInfoTask      = SystemInfo.GetGpuUsageInfo();
+            var gpuVideoInfoTask = SystemInfo.GetVideoAdapterInfo();
+            var serverVersion    = _versionService.VersionConfig?.VersionInfo?.Version ?? string.Empty;
 
-            var backend = HttpContext.RequestServices.GetServices<IHostedService>()
-                                                     .OfType<BackendProcessRunner>()
-                                                     .FirstOrDefault();
-            if (backend is not null)
+            var systemStatus = new StringBuilder();
+            systemStatus.AppendLine($"Server version:   {serverVersion}");
+            systemStatus.AppendLine(SystemInfo.GetSystemInfo());
+            systemStatus.AppendLine();
+            systemStatus.AppendLine();
+
+            systemStatus.AppendLine(await gpuInfoTask);
+            systemStatus.AppendLine();
+            systemStatus.AppendLine();
+
+            systemStatus.AppendLine(await gpuVideoInfoTask);
+            systemStatus.AppendLine();
+            systemStatus.AppendLine();
+
+            var environmentVariables = _moduleProcessService?.GlobalEnvironmentVariables;
+            if (environmentVariables is not null)
             {
-                systemStatus.Insert(0, SystemInfo.GetSystemInfo() + Environment.NewLine + Environment.NewLine);
-
-                var environmentVariables = backend?.GlobalEnvironmentVariables;
-                if (environmentVariables is not null)
+                systemStatus.AppendLine();
+                systemStatus.AppendLine("Global Environment variables:");
+                int maxLength = environmentVariables.Max(x => x.Key.ToString().Length);
+                foreach (var envVar in environmentVariables)
                 {
-                    systemStatus.AppendLine();
-                    systemStatus.AppendLine("Global Environment variables:");
-                    int maxLength = environmentVariables.Max(x => x.Key.ToString().Length);
-                    foreach (var envVar in environmentVariables)
-                        systemStatus.AppendLine($"  {envVar.Key.PadRight(maxLength)} = {envVar.Value}");
+                    string? value = envVar.Value?.ToString() ?? string.Empty;
+                    value = _moduleSettings.ExpandOption(value, null);
+
+                    systemStatus.AppendLine($"  {envVar.Key.PadRight(maxLength)} = {value}");
                 }
             }
 
             var response = new
             {
-                GpuUsage          = await SystemInfo.Get3DGpuUsage(),
-                DedicatedRAMUsage = SystemInfo.GetGpuMemoryUsage(),
-                ServerStatus      = systemStatus.ToString()
+                CpuUsage       = await cpuUsageTask,
+                SystemMemUsage = await SystemInfo.GetSystemMemoryUsage(),
+                GpuUsage       = await gpuUsageTask,
+                GpuMemUsage    = await SystemInfo.GetGpuMemoryUsage(),
+                ServerStatus   = systemStatus.ToString()
             };
 
             return response;
@@ -145,7 +175,7 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
         public async Task<ResponseBase> GetUpdateAvailable()
         {
-            VersionInfo? latest = await VersionService.GetLatestVersion();
+            VersionInfo? latest = await _versionService.GetLatestVersion();
             if (latest is null)
             {
                 return new VersionUpdateResponse
@@ -156,7 +186,7 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
             }
             else
             {
-                VersionInfo? current = VersionService.VersionConfig.VersionInfo;
+                VersionInfo? current = _versionService.VersionConfig.VersionInfo;
                 if (current == null)
                 {
                     return new VersionUpdateResponse
@@ -184,7 +214,8 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         }
 
         /// <summary>
-        /// Allows for a client to list the status of the backend analysis services.
+        /// Allows for a client to list the status of the backend analysis modules.
+        /// TODO: move this to modules controller, path is modules/status/list
         /// </summary>
         /// <returns>A ResponseBase object.</returns>
         [HttpGet("analysis/list", Name = "ListAnalysisStatus")]
@@ -193,28 +224,27 @@ namespace CodeProject.AI.API.Server.Frontend.Controllers
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
         public ResponseBase ListAnalysisStatus()
         {
-            // Get the backend processor (DI won't work here due to the order things get fired up
-            // in Main.
-            var backend = HttpContext.RequestServices.GetServices<IHostedService>()
-                                                     .OfType<BackendProcessRunner>()
-                                                     .FirstOrDefault();
-            if (backend is null)
-                return new ErrorResponse("Unable to locate backend services");
+            // COMMENTED: not possible.
+            //if (_moduleRunner.ProcessStatuses is null)
+            //    return new ErrorResponse("No backend analysis modules have been registered");
 
-            if (backend.ProcessStatuses is null)
-                return new ErrorResponse("No backend processes have been registered");
+            foreach (ProcessStatus process in _moduleProcessService.ListProcessStatuses())
+            {
+                if (!string.IsNullOrEmpty(process.ModuleId))
+                {
+                    ModuleConfig? module   = _moduleCollection.GetModule(process.ModuleId);
+                    process.StartupSummary = module?.SettingsSummary ?? string.Empty;
+                    if (string.IsNullOrEmpty(process.StartupSummary))
+                        Console.WriteLine($"Unable to find module for {process.ModuleId}");
+                }
+            }
 
-            foreach (ProcessStatus process in backend.ProcessStatuses.Values)
-                if (process.ModuleId is not null)
-                    process.StartupSummary = backend.GetModule(process.ModuleId)?.SettingsSummary;
-
-            // List them out and return the status
+            // ListProcessStatuses then out and return the status
             var response = new AnalysisServicesStatusResponse
             {
-                statuses = backend.ProcessStatuses
-                                  .Values
-                                  // .Where(module => module.Status != ProcessStatusType.NotEnabled)
-                                  .ToList()
+                statuses = _moduleProcessService.ListProcessStatuses()
+                            // .Where(module => module.Status != ProcessStatusType.NotEnabled)
+                           .ToList()
             };
 
             return response;
