@@ -4,16 +4,19 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 
-using CodeProject.AI.SDK;
-using CodeProject.AI.SDK.Common;
-using CodeProject.AI.SDK.Utils;
-
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+
+using CodeProject.AI.SDK;
+using CodeProject.AI.SDK.Utils;
 using CodeProject.AI.Server.Backend;
+using CodeProject.AI.Server.Models;
+using CodeProject.AI.SDK.Modules;
+using CodeProject.AI.SDK.Backend;
+using CodeProject.AI.SDK.Common;
 
 namespace CodeProject.AI.Server.Modules
 {
@@ -30,6 +33,7 @@ namespace CodeProject.AI.Server.Modules
         private readonly QueueServices                  _queueServices;
         private readonly ILogger<ModuleProcessServices> _logger;
         private readonly ModuleSettings                 _moduleSettings;
+        private readonly ModelDownloader                _modelDownloader;
         private readonly BackendRouteMap                _routeMap;
 
         /// <summary>
@@ -40,26 +44,34 @@ namespace CodeProject.AI.Server.Modules
         /// <param name="queueServices">The QueueServices instance.</param>
         /// <param name="logger">The Logger.</param>
         /// <param name="moduleSettings">The module settings.</param>
+        /// <param name="modelDownloader">The model downloader</param>
         /// <param name="routeMap">The BackendRouteMap.</param>
         public ModuleProcessServices(IOptions<VersionConfig> versionOptions,
                                      IOptions<ServerOptions> serverOptions,
                                      QueueServices queueServices, 
                                      ILogger<ModuleProcessServices> logger,
                                      ModuleSettings moduleSettings,
+                                     ModelDownloader modelDownloader,
                                      BackendRouteMap routeMap)
         {
-            _versionConfig  = versionOptions.Value;
-            _serverOptions  = serverOptions.Value;
-            _queueServices  = queueServices;
-            _logger         = logger;
-            _moduleSettings = moduleSettings;
-            _routeMap       = routeMap;
+            _versionConfig   = versionOptions.Value;
+            _serverOptions   = serverOptions.Value;
+            _queueServices   = queueServices;
+            _logger          = logger;
+            _moduleSettings  = moduleSettings;
+            _modelDownloader = modelDownloader;
+            _routeMap        = routeMap;
         }
 
         /// <summary>
         /// Gets the count of processes.
         /// </summary>
         public int Count => _processStatuses.Count;
+
+        /// <summary>
+        /// An event that is raised when a module's state changes.
+        /// </summary>
+        public Func<ModuleConfig, Task>? OnModuleStateChange { get; set; } = null;
 
         /// <summary>
         /// Gets the environment variables applied to all processes.
@@ -124,6 +136,122 @@ namespace CodeProject.AI.Server.Modules
         }
 
         /// <summary>
+        /// Updates info on when the given module was last seen.
+        /// </summary>
+        /// <param name="moduleId">The Id of the module</param>
+        /// <returns>True on success; false otherwise</returns>
+        public bool UpdateModuleLastSeen(string moduleId)
+        {
+            if (string.IsNullOrEmpty(moduleId))
+                return false;
+
+            if (!TryGetProcessStatus(moduleId, out ProcessStatus? processStatus))
+                return false;
+
+            if (processStatus!.Status != ProcessStatusType.Stopping && processStatus.Status != ProcessStatusType.Started)
+                processStatus.Status = ProcessStatusType.Started;
+
+            processStatus!.Started ??= DateTime.UtcNow;
+            processStatus.LastSeen = DateTime.UtcNow;
+
+            return true;
+        }
+
+        /// <summary>
+        /// Updates the count of the number of times the given module has processed a request. In
+        /// doing so it will also update the time we last saw the module.
+        /// </summary>
+        /// <param name="moduleId">The Id of the module</param>
+        /// <returns>True on success; false otherwise</returns>
+        public bool UpdateModuleProcessingCount(string moduleId)
+        {
+            if (string.IsNullOrEmpty(moduleId))
+                return false;
+
+            if (!TryGetProcessStatus(moduleId, out ProcessStatus? processStatus))
+                return false;
+
+            lock (processStatus!)
+            {
+                processStatus.IncrementRequestCount();
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Advises that this module may (or may not) be shutting down. This allows the ProcessStatus
+        /// 'Status' property to have up-to-date info for when it next reports back to the UI.
+        /// </summary>
+        /// <param name="moduleId">The ID of the module</param>
+        /// <param name="signalShutdown">Whether or not this process is shutting down</param>
+        /// <returns>True on success; false otherwise</returns>
+        public bool AdviseProcessShutdown(string moduleId, bool signalShutdown = true)
+        {
+            if (string.IsNullOrEmpty(moduleId))
+                return false;
+
+            if (!TryGetProcessStatus(moduleId, out ProcessStatus? processStatus))
+                return false;
+
+            lock (processStatus!)
+            {
+                processStatus.Status = signalShutdown ? ProcessStatusType.Stopping : ProcessStatusType.Started;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Updates the inferenceDevice, bool canUseGPU information for a module.
+        /// HACK: This is a legacy hack for Modules for server &lt;= 2.5.1. Remove when server &gt;= 2.6
+        /// </summary>
+        /// <param name="moduleId">The ID of the module</param>
+        /// <param name="inferenceDevice">The execution provider, typically the GPU library in use</param>
+        /// <param name="canUseGPU">Whether or not the module can use the current GPU</param>
+        /// <returns>True on success; false otherwise</returns>
+        public bool UpdateProcessStatusData(string moduleId, string? inferenceDevice, bool? canUseGPU)
+        {
+            if (string.IsNullOrEmpty(moduleId))
+                return false;
+
+            if (!TryGetProcessStatus(moduleId, out ProcessStatus? processStatus))
+                return false;
+
+            lock (processStatus!)
+            {
+                processStatus.StatusData?.TryAdd("InferenceDevice", inferenceDevice);
+                processStatus.StatusData?.TryAdd("CanUseGPU",       canUseGPU);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Updates the status information for a module. This info is passed back from a module and
+        /// is ad-hoc data: nothing can be assumed. It's just the bag of info the module has decided
+        /// to share with the world.
+        /// </summary>
+        /// <param name="moduleId">The ID of the module</param>
+        /// <param name="statusData">The status data bag</param>
+        /// <returns>True on success; false otherwise</returns>
+        public bool UpdateProcessStatusData(string moduleId, JsonObject? statusData)
+        {
+            if (string.IsNullOrEmpty(moduleId))
+                return false;
+
+            if (!TryGetProcessStatus(moduleId, out ProcessStatus? processStatus))
+                return false;
+
+            lock (processStatus!)
+            {
+                processStatus.StatusData = statusData;
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Kills a process
         /// </summary>
         /// <param name="module">The module for the process to be killed</param>
@@ -141,6 +269,10 @@ namespace CodeProject.AI.Server.Modules
                 return true;
             }
 
+            TryGetProcessStatus(module.ModuleId, out ProcessStatus? processStatus);           
+            if (processStatus is not null)
+                processStatus.Status = ProcessStatusType.Stopping;
+
             bool hasExited = true;
             try
             {
@@ -157,8 +289,11 @@ namespace CodeProject.AI.Server.Modules
                 // Send a 'Quit' request but give it time to wrap things up before we step in further
                 var payload = new RequestPayload("Quit");
                 payload.SetValue("moduleId", module.ModuleId);
-                await _queueServices.SendRequestAsync(module.Queue!, new BackendRequest(payload))
+                await _queueServices.SendRequestAsync(module.LaunchSettings!.Queue!, 
+                                                      new BackendRequest(payload))
                                     .ConfigureAwait(false);
+
+                _logger.LogInformation($"Shutdown request for {process.ProcessName}/{module.ModuleId} complete: Waiting for cleanup...");
 
                 int shutdownServerDelaySecs = _moduleSettings.DelayAfterStoppingModulesSecs;
                 if (shutdownServerDelaySecs > 0)
@@ -183,12 +318,15 @@ namespace CodeProject.AI.Server.Modules
                         _logger.LogDebug($"{module.ModuleId} ended after {stopWatch.ElapsedMilliseconds} ms");
                     }
                     else
-                        _logger.LogInformation($"{module.ModuleId} went quietly");
+                    {
+                        hasExited = true;
+                        _logger.LogInformation($"{module.ModuleId} shut down correctly");
+                    }
                 }
                 catch(Exception ex)
                 {
-                    _logger.LogError(ex, $"Error trying to stop {module.Name} ({module.FilePath})");
-                    _logger.LogError(ex.Message);
+                    _logger.LogError(ex, $"Error trying to stop {module.Name} ({module.LaunchSettings!.FilePath})");
+                    _logger.LogError("Error is: " + ex.Message);
                     _logger.LogError(ex.StackTrace);
                 }
                 finally
@@ -199,8 +337,17 @@ namespace CodeProject.AI.Server.Modules
                 }
             }
             else
+            {
+                hasExited = true;
                 _logger.LogInformation($"{module.ModuleId} has left the building");
+            }
 
+            if (hasExited && processStatus is not null)
+                processStatus.Status = ProcessStatusType.Stopped;
+
+            // fire the event
+            if (OnModuleStateChange != null)
+                await OnModuleStateChange(module);
 
             return true;
         }
@@ -213,35 +360,40 @@ namespace CodeProject.AI.Server.Modules
         /// process</param>
         /// <param name="installSummary">The installation summary, in case we want to display this
         /// later on</param>
-        public void AddProcess(ModuleConfig module, bool launchingProcess, string? installSummary)
+        /// <param name="allowOverwrite">If true, we can replace an existing process in the list
+        /// with updated info</param>
+        public void AddProcess(ModuleConfig module, bool launchingProcess, string? installSummary,
+                               bool allowOverwrite = false)
         {
             if (module?.ModuleId is null)
                 return;
                 
-            if (TryGetProcessStatus(module?.ModuleId!, out ProcessStatus? _))
+            if (!allowOverwrite && TryGetProcessStatus(module?.ModuleId!, out ProcessStatus? _))
                 return;
 
-            string? summary = module!.SettingsSummary;
-            if (!string.IsNullOrEmpty(summary))
-            {
-                // Expanding out the macros causes the display to be too wide
-                summary = _moduleSettings.ExpandOption(summary, module.ModulePath);
+            // TODO: The menus may change depending on state (eg GPU goes offline, so GPU options no
+            // longer available). Enable Menus to be updated
+            var    menus   = module!.UIElements?.Menus;
+            var    models  = module!.InstallOptions?
+                                    .DownloadableModels.Select(m => ModelDownload.FromConfig(m))?
+                                    .ToArray();
+            string summary = module!.SettingsSummary(_moduleSettings) ?? string.Empty;
 
-                // But we can mitigate this somewhat  
-                string appRoot = CodeProject.AI.Server.Program.ApplicationRootPath!;
-                summary = summary?.Replace(appRoot, "&lt;root&gt;");
-            }
-            
             ProcessStatus status = new ProcessStatus()
             {
-                ModuleId       = module!.ModuleId,
-                Name           = module.Name,
-                Version        = module.Version,
-                Queue          = module.Queue,
-                Status         = ProcessStatusType.Unknown,
-                StartupSummary = summary ?? string.Empty,
-                InstallSummary = installSummary ?? string.Empty,
+                ModuleId           = module!.ModuleId,
+                Name               = module.Name,
+                Version            = module.Version,
+                Queue              = module.LaunchSettings!.Queue,
+                Menus              = menus,
+                DownloadableModels = models,
+                Status             = ProcessStatusType.Unknown,
+                StartupSummary     = summary,
+                InstallSummary     = installSummary ?? string.Empty,
             };
+
+            if (allowOverwrite)
+                RemoveProcessStatus(module.ModuleId);
             _processStatuses.TryAdd(module.ModuleId, status);
 
             // Set the status of the Process prior to launching. This will be updated post launch.
@@ -254,35 +406,56 @@ namespace CodeProject.AI.Server.Modules
         /// Starts, or restarts (if necessary and possible) a process. 
         /// </summary>
         /// <param name="module">The module to be started</param>
+        /// <param name="installSummary">The installation summary, in case we want to display this
+        /// later on. This is only provided in cases where we have the install summary, and we know
+        /// we may not have a process already in place for this module. We'll use this value when
+        /// creating a new process.</param>
         /// <returns>True on success; false otherwise</returns>
-        public async Task<bool> StartProcess(ModuleConfig module)
+        public async Task<bool> StartProcess(ModuleConfig module, string? installSummary)
         {
             if (module is null || string.IsNullOrWhiteSpace(module.ModuleId))
                 return false;
 
-            if (!TryGetProcessStatus(module.ModuleId, out ProcessStatus? processStatus))
+            // TODO: The menus may change depending on state (eg GPU goes offline, so GPU options no
+            // longer available). Enable Menus to be updated
+            var    menus   = module!.UIElements?.Menus;
+            var    models  = module!.InstallOptions?
+                                    .DownloadableModels.Select(m => ModelDownload.FromConfig(m))?
+                                    .ToArray();
+            string summary = module!.SettingsSummary(_moduleSettings) ?? string.Empty;
+
+            if (TryGetProcessStatus(module.ModuleId, out ProcessStatus? processStatus) &&
+                processStatus is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(summary))
+                    processStatus.StartupSummary = summary;
+            }
+            else
             {
                 processStatus = new ProcessStatus()
                 {
-                    ModuleId = module.ModuleId,
-                    Name     = module.Name,
-                    Version  = module.Version,
-                    Queue    = module.Queue,
-                    Status   = ProcessStatusType.Unknown
+                    ModuleId           = module.ModuleId,
+                    Name               = module.Name,
+                    Version            = module.Version,
+                    Queue              = module.LaunchSettings!.Queue,
+                    Menus              = menus,
+                    DownloadableModels = models,
+                    Status             = ProcessStatusType.Unknown,
+                    StartupSummary     = summary,
+                    InstallSummary     = installSummary ?? string.Empty,
                 };
+
                 _processStatuses.TryAdd(module.ModuleId, processStatus);
             }
 
-            // The module will need its status to be "Enabled" in order to be launched. We set
+            // The module will need its status to be "AutoStart" in order to be launched. We set
             // "launchModules" = true here since this method will be called after the server has
             // already started. Only on server start do we entertain the possibility that we won't
             // actually start a module. At all other times we ensure they start.
             if (!SetPreLaunchProcessStatus(module, true))
                 return false;
 
-            SetPreLaunchProcessStatus(module, true);
-
-            if (processStatus!.Status != ProcessStatusType.Enabled)
+            if (processStatus!.Status != ProcessStatusType.AutoStart)
                 return false;
 
             Process? process = null;
@@ -307,7 +480,6 @@ namespace CodeProject.AI.Server.Modules
                 // Start the process
                 _logger.LogTrace($"Starting {Text.ShrinkPath(process.StartInfo.FileName, 50)} {Text.ShrinkPath(process.StartInfo.Arguments, 50)}");
 
-                string summary = module.SettingsSummary;
                 string[] lines = summary.Split('\n');
 
                 _logger.LogInformation("");
@@ -331,7 +503,7 @@ namespace CodeProject.AI.Server.Modules
 
                     _logger.LogInformation($"Started {module.Name} module");
 
-                    int postStartPauseSecs = module.PostStartPauseSecs ?? 3;
+                    int postStartPauseSecs = module.LaunchSettings!.PostStartPauseSecs ?? 3;
 
                     // Trying to reduce startup CPU and instantaneous memory use for low resource
                     // environments such as Docker or RPi
@@ -347,8 +519,8 @@ namespace CodeProject.AI.Server.Modules
             {
                 processStatus.Status = ProcessStatusType.FailedStart;
 
-                _logger.LogError(ex, $"Error trying to start {module.Name} ({module.FilePath})");
-                _logger.LogError(ex.Message);
+                _logger.LogError(ex, $"Error trying to start {module.Name} ({module.LaunchSettings!.FilePath})");
+                _logger.LogError("Error is: " + ex.Message);
                 _logger.LogError(ex.StackTrace);
 #if DEBUG
                 _logger.LogError($" *** Did you setup the Development environment?");
@@ -357,7 +529,7 @@ namespace CodeProject.AI.Server.Modules
                 else
                     _logger.LogError($"     In /src, run 'bash setup.sh'");
 
-                _logger.LogError($"Exception: {ex.Message}");
+                _logger.LogError($"StartProcess Exception: {ex.Message}");
 #else
                 _logger.LogError($"*** Please check the CodeProject.AI installation completed successfully");
 #endif
@@ -365,6 +537,10 @@ namespace CodeProject.AI.Server.Modules
 
             if (process is null)
                 _runningProcesses.TryRemove(module.ModuleId, out _);
+
+            // fire the event
+            if (OnModuleStateChange != null)
+                await OnModuleStateChange(module);
 
             return process != null;
         }
@@ -380,12 +556,15 @@ namespace CodeProject.AI.Server.Modules
             if (module is null || string.IsNullOrWhiteSpace(module.ModuleId))
                 return false;
 
-            if (string.IsNullOrEmpty(module.FilePath))
+            if (string.IsNullOrEmpty(module.LaunchSettings!.FilePath))
                 return false;
 
             ProcessStatus? status = GetProcessStatus(module.ModuleId);
             if (status == null)
                 return false;
+
+            status.Status = module.LaunchSettings?.AutoStart == false 
+                          ? ProcessStatusType.Stopping : ProcessStatusType.Restarting;
 
             // We can't reuse a process (easily). Kill the old and create a brand new one
             if (_runningProcesses.TryGetValue(module.ModuleId, out Process? process) && process != null)
@@ -398,17 +577,19 @@ namespace CodeProject.AI.Server.Modules
                 status.Status = ProcessStatusType.Stopped;
 
             // If we're actually meant to be killing this process, then just leave now.
-            if (module.AutoStart == false || !module.Available(SystemInfo.Platform, _versionConfig.VersionInfo?.Version))
+            if (module.LaunchSettings?.AutoStart == false || !module.IsCompatible(_versionConfig.VersionInfo?.Version))
                 return true;
 
-            return await StartProcess(module).ConfigureAwait(false);
+            status.Status = ProcessStatusType.Restarting;
+
+            return await StartProcess(module, null).ConfigureAwait(false);
         }
 
         /// <summary>
         /// Sets the current status of the module just before it's to be started
         /// </summary>
         /// <param name="module">The module to be restarted</param>
-        /// <param name="launchingProcess">Whether or not we will be actually launching the module's
+        /// <param name="launchingProcess">Whether or not we will be actually launch the module's
         /// process</param>
         /// <returns>True on success; false otherwise</returns>
         public bool SetPreLaunchProcessStatus(ModuleConfig module, bool launchingProcess)
@@ -421,12 +602,12 @@ namespace CodeProject.AI.Server.Modules
             }
 
             // setup the routes for this module.
-            if (module.Available(SystemInfo.Platform, _versionConfig.VersionInfo?.Version))
+            if (module.IsCompatible(_versionConfig.VersionInfo?.Version))
             {
-                if (!module.AutoStart == true)
-                    status.Status = ProcessStatusType.NotEnabled;
+                if (!module.LaunchSettings!.AutoStart == true)
+                    status.Status = ProcessStatusType.NoAutoStart;
                 else if (launchingProcess)
-                    status.Status = ProcessStatusType.Enabled;
+                    status.Status = ProcessStatusType.AutoStart;
                 else
                     status.Status = ProcessStatusType.NotStarted;
             }
@@ -443,7 +624,7 @@ namespace CodeProject.AI.Server.Modules
         /// <returns>True if successful.</returns>
         public bool SetupQueueAndRoutes(ModuleConfig module)
         {
-            if (string.IsNullOrWhiteSpace(module.Queue))
+            if (string.IsNullOrWhiteSpace(module.LaunchSettings!.Queue))
             {
                 _logger.LogWarning($"No queue specified for {module.Name}");
                 return false;
@@ -455,10 +636,15 @@ namespace CodeProject.AI.Server.Modules
                 return false;
             }
 
-            _queueServices.EnsureQueueExists(module.Queue);
+            _queueServices.EnsureQueueExists(module.LaunchSettings!.Queue);
 
-            foreach (var routeInfo in module.RouteMaps)
-                _routeMap.Register(routeInfo, module.Queue!);
+            // Add the routes the module has defined
+            foreach (ModuleRouteInfo routeInfo in module.RouteMaps)
+                _routeMap.Register(routeInfo, module.LaunchSettings!.Queue!, module.ModuleId);
+
+            // Add the system routes
+            foreach (ModuleRouteInfo routeInfo in ModuleRouteInfo.SystemDefaultRouteMaps)
+                _routeMap.Register(routeInfo, module.LaunchSettings!.Queue!, module.ModuleId);
 
             return true;
         }
@@ -467,12 +653,13 @@ namespace CodeProject.AI.Server.Modules
         {
             // We could combine these into a single method that returns a tuple
             // but this is not a place that needs optimisation. It needs clarity.
-            string modulePath = _moduleSettings.GetModulePath(module);
-            string workingDir = _moduleSettings.GetWorkingDirectory(module);
-            string filePath   = _moduleSettings.GetFilePath(module);
-            string? command   = _moduleSettings.GetCommandPath(module);
+            // string moduleDirPath = _moduleSettings.GetModuleDirPath(module);
+            string moduleDirPath = module.ModuleDirPath;
+            string workingDir    = module.WorkingDirectory;
+            string filePath      = _moduleSettings.GetFilePath(module);
+            string? command      = _moduleSettings.GetCommandPath(module);
 
-            _logger.LogTrace($"Command: {command}");
+            _logger.LogTrace($"Running module using: {command}");
 
             // Setup the process we're going to launch
 #if Windows
@@ -483,8 +670,12 @@ namespace CodeProject.AI.Server.Modules
             // because the Process.Start is choking on the quotes
             var executableName = filePath;
 #endif
-            ProcessStartInfo? procStartInfo = (command == "execute" || command == "launcher")
-                ? new ProcessStartInfo(executableName)
+            bool useLauncher = command == "execute" || command == "launcher";
+            if (SystemInfo.IsWindows && command == "dotnet")
+                useLauncher = true;
+
+            ProcessStartInfo? procStartInfo = useLauncher ? 
+                new ProcessStartInfo(executableName)
                 {
                     UseShellExecute        = false,
                     WorkingDirectory       = workingDir,
@@ -492,7 +683,8 @@ namespace CodeProject.AI.Server.Modules
                     RedirectStandardOutput = true,
                     RedirectStandardError  = true
                 }
-                : new ProcessStartInfo($"{command}", $"\"{filePath}\"")
+                :
+                new ProcessStartInfo($"{command}", $"\"{filePath}\"")
                 {
                     UseShellExecute        = false,
                     WorkingDirectory       = workingDir,
@@ -502,7 +694,7 @@ namespace CodeProject.AI.Server.Modules
                 };
 
             // Set the environment variables
-            Dictionary<string, string?> environmentVars = BuildBackendEnvironmentVar(module, modulePath);
+            Dictionary<string, string?> environmentVars = BuildBackendEnvironmentVar(module);
             foreach (var kv in environmentVars)
                 procStartInfo.Environment.TryAdd(kv.Key.ToUpper(), kv.Value);
 
@@ -602,12 +794,20 @@ namespace CodeProject.AI.Server.Modules
             if (sender is Process process)
             {
                 string directory = process.StartInfo.WorkingDirectory;
-                string? moduleId = new DirectoryInfo(directory).Name;
+
+                // Bad assumption: A module's ID is same as the name of folder in which it lives.
+                // string? moduleId = new DirectoryInfo(directory).Name;
+
+                string? moduleId = ModuleConfigExtensions.GetModuleIdFromModuleSettings(directory);
                 if (moduleId is null)
                 {
                     _logger.LogError($"Module in {directory} has shutdown, but can't find the module itself");
                     return;
                 }
+
+                TryGetProcessStatus(moduleId, out ProcessStatus? processStatus);           
+                if (processStatus is not null)
+                    processStatus.Status = ProcessStatusType.Stopped;
 
                 _logger.LogInformation($"** Module {moduleId} has shutdown");
 
@@ -621,9 +821,7 @@ namespace CodeProject.AI.Server.Modules
         /// Creates the collection of backend environment variables.
         /// </summary>
         /// <param name="module">The current module</param>
-        /// <param name="currentModulePath">The path to the current module, if appropriate.</param>
-        private Dictionary<string, string?> BuildBackendEnvironmentVar(ModuleConfig module,
-                                                                       string? currentModulePath = null)
+        private Dictionary<string, string?> BuildBackendEnvironmentVar(ModuleConfig module)
         {
             Dictionary<string, string?> processEnvironmentVars = new();
             _serverOptions.AddEnvironmentVariables(processEnvironmentVars);
@@ -635,36 +833,47 @@ namespace CodeProject.AI.Server.Modules
             // processEnvironmentVars = processEnvironmentVars.ToDictionary(kvp => kvp.Key.ToUpper(),
             //                                                              kvp => ExpandOption(kvp.Value));
 
-            var keys = processEnvironmentVars.Keys.ToList();
+            List<string> keys = processEnvironmentVars.Keys.ToList();
             foreach (string key in keys)
             {
                 string? value = processEnvironmentVars[key.ToUpper()];
-                processEnvironmentVars[key.ToUpper()] = _moduleSettings.ExpandOption(value, currentModulePath);
+
+                // don't expand if it starts with @
+                if (value != null && value.StartsWith("@"))
+                    value = value.Substring(1);
+                else
+                    value = _moduleSettings.ExpandOption(value, module.ModuleDirPath);
+
+                processEnvironmentVars[key.ToUpper()] = value;
             }
 
             // And now add general vars
+            bool enableGPU = (module.GpuOptions?.InstallGPU ?? false) && (module.GpuOptions?.EnableGPU ?? false);
+
             processEnvironmentVars.TryAdd("CPAI_MODULE_SERVER_LAUNCHED", "true");
             processEnvironmentVars.TryAdd("CPAI_MODULE_ID",          module.ModuleId);
             processEnvironmentVars.TryAdd("CPAI_MODULE_NAME",        module.Name);
-            processEnvironmentVars.TryAdd("CPAI_MODULE_PATH",        _moduleSettings.GetModulePath(module));
-            processEnvironmentVars.TryAdd("CPAI_MODULE_PARALLELISM", module.Parallelism.ToString());
-            processEnvironmentVars.TryAdd("CPAI_MODULE_QUEUENAME",   module.Queue);
-            if ((module.RequiredMb ?? 0) > 0)
-                processEnvironmentVars.TryAdd("CPAI_MODULE_REQUIRED_MB", module.RequiredMb?.ToString());
-            processEnvironmentVars.TryAdd("CPAI_MODULE_SUPPORT_GPU", (module.SupportGPU ?? false).ToString());
-            processEnvironmentVars.TryAdd("CPAI_ACCEL_DEVICE_NAME",  module.AcceleratorDeviceName);
-            processEnvironmentVars.TryAdd("CPAI_HALF_PRECISION",     module.HalfPrecision);
-            processEnvironmentVars.TryAdd("CPAI_LOG_VERBOSITY",      (module.LogVerbosity ?? LogVerbosity.Info).ToString());
+            processEnvironmentVars.TryAdd("CPAI_MODULE_PATH",        module.ModuleDirPath);
+
+            processEnvironmentVars.TryAdd("CPAI_MODULE_QUEUENAME",   module.LaunchSettings?.Queue);
+            if ((module.LaunchSettings?.RequiredMb ?? 0) > 0)
+                processEnvironmentVars.TryAdd("CPAI_MODULE_REQUIRED_MB", module.LaunchSettings?.RequiredMb?.ToString());
+            processEnvironmentVars.TryAdd("CPAI_LOG_VERBOSITY",      (module.LaunchSettings?.LogVerbosity ?? LogVerbosity.Quiet).ToString());
+
+            processEnvironmentVars.TryAdd("CPAI_MODULE_PARALLELISM", (module.LaunchSettings?.Parallelism ?? 0).ToString());
+            processEnvironmentVars.TryAdd("CPAI_MODULE_ENABLE_GPU",  enableGPU.ToString());
+            processEnvironmentVars.TryAdd("CPAI_ACCEL_DEVICE_NAME",  module.GpuOptions?.AcceleratorDeviceName);
+            processEnvironmentVars.TryAdd("CPAI_HALF_PRECISION",     module.GpuOptions?.HalfPrecision);
 
             // Make sure the runtime environment variables used by the server are passed to the
             // child process. Otherwise the NET module may start in Production mode. We *hope* the
             // environment vars are passed down to to spawned processes, but we'll add these two
             // just in case.
-            var aspnetEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+            string? aspnetEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
             if (aspnetEnv != null)
                 processEnvironmentVars.TryAdd("ASPNETCORE_ENVIRONMENT", aspnetEnv);
 
-            var dotnetEnv = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT");
+            string? dotnetEnv = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT");
             if (dotnetEnv != null)
                 processEnvironmentVars.TryAdd("DOTNET_ENVIRONMENT", dotnetEnv);
 

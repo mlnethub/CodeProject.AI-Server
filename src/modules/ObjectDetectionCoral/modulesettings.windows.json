@@ -1,7 +1,0 @@
-{
-  "Modules": {
-    "ObjectDetectionCoral": {
-      "Runtime": "python3.7"
-    }
-  }
-}

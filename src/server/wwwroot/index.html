@@ -21,10 +21,37 @@
     <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16x16.png">
 
     <link id="bootstrapCss" rel="stylesheet" type="text/css" href="assets/bootstrap-dark.min.css">
-    <link rel="stylesheet" type="text/css" href="assets/dashboard.css?v=2.2.0">
+    <link rel="stylesheet" type="text/css" href="assets/server.css?v=2.9.3">
 
-    <script type="text/javascript" src="assets/dashboard.js?v=2.2.0"></script>
+    <script type="text/javascript" src="assets/server.js?v=2.9.3"></script>
+    <script type="text/javascript" src="assets/dashboard.js?v=2.9.3"></script>
     <script type="text/javascript">
+    window.addEventListener('DOMContentLoaded', function (event) {
+
+        let urlElm = document.getElementById('serviceUrl');
+        urlElm.value = apiServiceUrl;
+
+        setServerStatus("Searching", "light", "Searching for Server");
+
+        getVersion();
+        checkForUpdates(false);
+        getDownloadableModules()
+
+        setInterval(ping, pingFrequencySec * 1000);
+        setInterval(getLogs, logFrequencyMs);
+        setInterval(getModulesStatuses, updateStatusFreqSec * 1000);
+        setInterval(getSystemStatus, updateStatusFreqSec * 1000);
+        setInterval(getDownloadableModules, updateStatusFreqSec * 1000);
+        setInterval(getMeshStatus, updateStatusFreqSec * 1000);
+        setInterval(checkForUpdates, checkUpdateFrequencySec * 1000);
+
+        setInterval(purgeMarkerIndices, 5000);
+
+        // force fresh reload
+        let launchLink = document.getElementById('explorer-launcher');
+        launchLink.href += "?random=" + new Date().getTime();
+    });
+
     /*
     const registerServiceWorker = async () => {
         if ("serviceWorker" in navigator) {
@@ -38,9 +65,17 @@
     registerServiceWorker();
     */
     </script>
+
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-8TS2RGRMFH"></script>
+    <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-8TS2RGRMFH');
+    </script>    
 </head>
 
-<body class="dark-mode">
+<body class="dark-mode dashboard">
 
     <div>
         <div class="main-panel mx-auto p-3">
@@ -107,7 +142,7 @@
 		S12.291,7.968,12.291,8.455z" />
                     </svg>
                 </a>
-                <a href="https://www.codeproject.com/ai" style="margin:0px 5px 0 0">
+                <a href="https://www.codeproject.github.io/codeproject.ai" style="margin:0px 5px 0 0">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 40 860 160" height="60px">
                 <defs><style>.cls-1{fill:#fff;}.cls-2{fill:#b3ddca;}</style></defs>
                 <g><title>CodeProject.AI</title>
@@ -118,10 +153,10 @@
             </div>
             <div class="d-flex justify-content-around small flex-nowrap overflow-hidden top-nav-bar" style="margin-top:-1rem">
                 <div class="me-3" title="Go to the CodeProject.AI homepage">
-                    <a href="https://www.codeproject.com/AI" target="_blank">CodeProject.AI</a>
+                    <a href="https://codeproject.github.io/codeproject.ai" target="_blank">CodeProject.AI</a>
                 </div>
                 <div title="Go to the CodeProject.AI documentation">
-                    <a href="https://www.codeproject.com/AI/docs/" target="_blank">Docs</a>
+                    <a href="https://codeproject.github.io/codeproject.ai/" target="_blank">Docs</a>
                 </div>
                 <div class="mx-3" title="Got a question or suggestion?">
                     <a href="https://www.codeproject.com/Feature/CodeProjectAI-Discussions.aspx"
@@ -131,29 +166,44 @@
                     <a href="https://www.codeproject.com/Articles/5322557/CodeProject-AI-Server-AI-the-easy-way">The Code</a>
                 </div>
                 <div class="ms-3 bg-info rounded-3" title="Explore the capabilities of your installed CodeProject.AI server">
-                    <a id="explorer-launcher" class="p-1" href="vision.html"
+                    <a id="explorer-launcher" class="p-1" href="explorer.html"
                        target="_blank">CodeProject.AI Explorer</a>
                 </div>
-                <div class="ms-auto me-3 server-status">
-                    Server is <span id="serverStatus" class="font-weight-bold ms-1"></span>
+				<div id="hostname" class="fw-bold ms-auto"></div>
+                <div id="communication" class="mt-0 signal">
+                    <svg fill="#00f900" width="16px" height="16px" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><g id="SVGRepo_bgCarrier" stroke-width="0"></g><g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g><g id="SVGRepo_iconCarrier"><path d="M10 14a1.99 1.99 0 0 0-1.981 2c0 1.104.887 2 1.981 2s1.98-.896 1.98-2c0-1.105-.886-2-1.98-2zm-4.2-2.242l1.4 1.414a3.933 3.933 0 0 1 5.601 0l1.399-1.414a5.898 5.898 0 0 0-8.4 0zM3 8.928l1.4 1.414a7.864 7.864 0 0 1 11.199 0L17 8.928a9.831 9.831 0 0 0-14 0zM.199 6.1l1.4 1.414a11.797 11.797 0 0 1 16.801 0L19.8 6.1a13.763 13.763 0 0 0-19.601 0z"></path></g></svg>						
                 </div>
-                <div id="version" style="cursor:pointer" onclick="checkForUpdates(true)" title="Check for updates"></div>
+				<div id="serverStatus" class="fw-bold ms-1 pe-2"></div>
+                <div id="server-version" style="cursor:pointer" onclick="checkForUpdates(true)" title="Check for updates"></div>
                 <div id="colourModeToggle" onclick="toggleColourMode()" class="ms-1" style="cursor:pointer">☀️</div>
             </div>
 
             <div class="card my-3">
                 <div class="card-body sub-panel">
-                    Your self contained AI server. Learn how to
-                    <a href="https://www.codeproject.com/AI/docs/api/api_reference.html" target="_blank">integrate
-                    with other programs</a> or
-                    <a href="https://www.codeproject.com/AI/docs/devguide/module_examples/adding_new_modules.html" target="_blank">add
-                    your own AI module</a>. Having problems? See our
-                    <a href="https://www.codeproject.com/AI/docs/devguide/common_errors.html" target="_blank">common solutions</a> or
-                    <a href="https://www.codeproject.com/Feature/CodeProjectAI-Discussions.aspx" target="_blank">ask a question</a>.
-                    <b>Blue Iris users</b>: please read our
-                    <a href="https://www.codeproject.com/Articles/5345399/Setting-Up-a-Wyze-Cam-with-Blue-Iris-and-CodeProje" target="_blank">Wyze cam setup guide</a> and
-                    <a href="https://www.codeproject.com/Articles/5346151/Solutions-for-Common-Issues-with-Blue-Iris-and-Cod" target="_blank">common issues</a> pages.
+                    Your self-contained AI server. 
+                    
+                    &nbsp;&nbsp; Need help?
+                    <a href="https://codeproject.github.io/codeproject.ai/devguide/common_errors.html" target="_blank">Common solutions</a> or
+                    <a href="https://www.codeproject.com/Feature/CodeProjectAI-Discussions.aspx" target="_blank">ask a Question</a>.
+                    
+                    &nbsp;&nbsp;
+
+                    Use in your apps:
+                    <a href="https://codeproject.github.io/codeproject.ai/api/api_reference.html" target="_blank">API guide</a> or
+                    <a href="https://codeproject.github.io/codeproject.ai/devguide/module_examples/adding_new_modules.html" target="_blank">add
+                    your own AI module</a>.
+
+                    &nbsp;
+
+                    <b>FAQs</b>: <a href="https://codeproject.github.io/codeproject.ai/faq/blue-iris.html" target="_blank">Blue Iris</a>, 
+                    <a href="https://codeproject.github.io/codeproject.ai/faq/home-assistant.html" target="_blank">Home Assistant</a>, 
+                    <a href="https://www.codeproject.com/Articles/5349191/How-to-Setup-Agent-DVR-and-CodeProject-AI-Server-o" target="_blank">Agent DVR</a>,
+                    <a href="https://www.codeproject.com/Articles/5345399/Setting-Up-a-Wyze-Cam-with-Blue-Iris-and-CodeProje" target="_blank">Wyze cams</a>.
                 </div>
+            </div>
+
+            <div class="card-body sub-panel p-0">
+                <div id="installNotice" class="py-2"></div>
             </div>
 
             <div class="alert alert-success" id="update" style="display:none"></div>
@@ -167,6 +217,9 @@
                 </li>
                 <li class="nav-item" id="system-tab-listitem">
                     <button class="nav-link" id="system-tab" data-bs-toggle="tab" data-bs-target="#system-panel" type="button" role="tab" aria-controls="system" aria-selected="true">System Info</button>
+                </li>
+                <li class="nav-item" id="mesh-tab-listitem">
+                    <button class="nav-link" id="mesh-tab" data-bs-toggle="tab" data-bs-target="#mesh-panel" type="button" role="tab" aria-controls="mesh" aria-selected="true">Mesh</button>
                 </li>
                 <li class="nav-item" id="modules-tab-listitem">
                     <button class="nav-link" id="modules-tab" data-bs-toggle="tab" data-bs-target="#modules-panel" type="button" role="tab" aria-controls="face" aria-selected="false">Install Modules</button>
@@ -192,24 +245,22 @@
                             </div>
                             <div class="d-flex small">
                                 <div class="text-muted">Logging level</div>
-                                <input type="range" id="logSeverity" class="w-25 mx-2" min="1" max="6" steps="1"
+                                <input type="range" id="logSeverity" class="tight w-25 mx-2" min="1" max="6" steps="1"
                                        value="4" list="steplist" onchange="updateLogVerbosity(this)">
                                 <datalist id="steplist">
                                     <option>1</option>
                                     <option>2</option>
-                                    <option>5</option>
+                                    <option>3</option>
                                     <option>4</option>
                                     <option>5</option>
                                     <option>6</option>
                                 </datalist>
                                 <div id="verbosity">Info</div>
+                                <div class="ms-auto"><a class="text-muted" href="javascript:0" onclick="return clearLogs()">Clear logs</a></div>
+
                             </div>
                             <div class="small mt-1" id="latestTiming"></div>
                         </div>
-                    </div>
-
-                    <div class="card-body sub-panel p-0">
-                        <div id="installNotice" class="py-2 px-3"></div>
                     </div>
 
                     <div class="card">
@@ -242,17 +293,39 @@
                         </div>
                         <div class="d-flex small">
                             <div class="text-muted">Logging level</div>
-                            <input type="range" id="logSeverity-main" class="w-25 mx-2" min="1" max="6" steps="1"
+                            <input type="range" id="logSeverity-main" class="tight w-25 mx-2" min="1" max="6" steps="1"
                                    value="4" list="steplist" onchange="updateLogVerbosity(this)">
                             <datalist id="steplist">
                                 <option>1</option>
                                 <option>2</option>
-                                <option>5</option>
+                                <option>3</option>
                                 <option>4</option>
                                 <option>5</option>
                                 <option>6</option>
                             </datalist>
                             <div id="verbosity-main">Info</div>
+                            <div class="ms-auto d-flex">
+                                <div class="dot dot-cycle mt-2"></div>
+                                <span>Logs with same colour are for the same request</span> 
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-pane fade show" id="mesh-panel" role="tabpanel" aria-labelledby="mesh-tab">
+                    <div class="card">
+                        <div class="card-body sub-panel">
+                            <div class="float-end">
+                                <button class="btn btn-primary" onclick="updateMeshSetting(event, 'Enable', false)">Stop</button>
+                                <button class="btn btn-primary" onclick="updateMeshSetting(event, 'Enable', true)">Start</button>
+                                <div class="form-check form-switch mt-1">
+                                    <input class="form-check-input" type="checkbox" id="showMeshRoutes" 
+                                           checked onchange="toggleMeshRoutes(this)">
+                                    <label class="form-check-label text-muted" for="showMeshRoutes">Show Routes</label>
+                                </div>
+                            </div>
+
+                            <div id="meshStatus" class='mesh-summary'>Mesh status loading...</div>
                         </div>
                     </div>
                 </div>
@@ -260,10 +333,35 @@
                 <div class="tab-pane fade show" id="modules-panel" role="tabpanel" aria-labelledby="modules-tab">
                     <div class="card">
 
-                        <div class="card-body sub-panel">
-                            <div id="availableModules" class="w-100"></div>
+                        <div class="d-flex justify-content-between mt-3">
+                            <div class="form-check form-switch ms-4">
+                                <input class="form-check-input" type="checkbox" id="noCache">
+                                <label class="form-check-label text-muted" for="noCache">Do not use download cache</label>
+                            </div>
+                            <div class="form-check form-switch ms-4 me-auto">
+                                <input class="form-check-input" type="checkbox" id="checkUpdates" checked>
+                                <label class="form-check-label text-muted" for="checkUpdates">Check for updates</label>
+                            </div>
+
+                            <div class="text-nowrap text-muted">
+                                Install verbosity 
+                            </div>
+                            <div class="mx-2">
+                                <select class="d-inline-block form-select-sm ms-2 bg-light" aria-label="Default select example" id="install-verbosity">
+                                <option selected value="quiet">Quiet</option>
+                                <option value="info">Info</option>
+                                <option value="loud">Loud</option>
+                                </select>                            
+                            </div>
                         </div>
 
+                        <div>
+                            <span class="font-weight-bold ms-3" id="moduleUpdateStatus"></span>
+                        </div>
+
+                        <div class="card-body sub-panel p-0">
+                            <div id="availableModules" class="w-100"></div>
+                        </div>
 <!--
                         <div class="form-group row my-3 mx-2">
                             <label class="col-form-label col text-end">Upload Module</label>
@@ -273,14 +371,6 @@
                             <input class="form-control btn-warning ms-2" style="width: 5rem;" id="install" type="button" value="Install" onclick="uploadModule()">
                         </div>
 -->
-
-                        <div class="form-check form-switch mx-4">
-                            <input class="form-check-input" type="checkbox" id="noCache">
-                            <label class="form-check-label text-muted" for="noCache">Do not use download cache</label>
-                        </div>
-                          <div>
-                            <span class="font-weight-bold ms-3" id="moduleUpdateStatus"></span>
-                        </div>
                     </div>                   
                 </div>
 

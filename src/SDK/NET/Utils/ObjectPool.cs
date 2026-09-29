@@ -1,4 +1,5 @@
-﻿using System.Collections.Concurrent;
+﻿using System;
+using System.Collections.Concurrent;
 
 namespace CodeProject.AI.SDK.Utils
 {
@@ -28,8 +29,8 @@ namespace CodeProject.AI.SDK.Utils
         /// <param name="init">A method to initialize the object before it is used.</param>
         public ObjectPool(int maxPooled, Func<TPooled> factory, Action<TPooled>? init = null)
         {
-            _factory = factory;
-            _init = init;
+            _factory   = factory;
+            _init      = init;
             _maxPooled = maxPooled;
         }
 
@@ -59,6 +60,5 @@ namespace CodeProject.AI.SDK.Utils
             if (tObj is not null && _pool.Count < _maxPooled)
                 _pool.Enqueue(tObj);
         }
-
     }
 }

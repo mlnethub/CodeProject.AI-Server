@@ -1,7 +1,0 @@
-{
-  "Modules": {
-    "ALPR": {
-      "SupportGPU": false // see requirements.linux.cuda.txt for discussion
-    }
-  }
-}

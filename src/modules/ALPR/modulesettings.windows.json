@@ -1,7 +1,0 @@
-{
-  "Modules": {
-    "ALPR": {
-      "Runtime": "python3.7"
-    }
-  }
-}

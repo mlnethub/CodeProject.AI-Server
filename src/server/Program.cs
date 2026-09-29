@@ -11,16 +11,17 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
-using CodeProject.AI.SDK.Common;
-using CodeProject.AI.SDK.Utils;
-using CodeProject.AI.Server.Backend;
-using CodeProject.AI.Server.Modules;
-
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+
+using CodeProject.AI.SDK.Common;
+using CodeProject.AI.SDK.Modules;
+using CodeProject.AI.SDK.Utils;
+using CodeProject.AI.Server.Backend;
+using CodeProject.AI.Server.Modules;
 
 namespace CodeProject.AI.Server
 {
@@ -29,15 +30,10 @@ namespace CodeProject.AI.Server
     /// </summary>
     public class Program
     {
-        const int defaultPort   = 32168;
-        const int legacyPort    = 5000;
-        const int legacyPortOsx = 5500;
-
         static private ILogger? _logger = null;
 
-        static private int _port = defaultPort;
-        // static private int _sPort = 5001; - eventually for SSL
-
+        static private int _port = Constants.DefaultPort;
+        // static private int _sPort = Constants.DefaultPortSsl; - eventually for SSL
 
         /// <summary>
         /// Gets or sets the Root Directory of the installation.
@@ -45,11 +41,18 @@ namespace CodeProject.AI.Server
         public static string ApplicationRootPath { get; set; }
 
         /// <summary>
+        /// Gets or sets the map of module Ids to module paths.
+        /// </summary>
+        public static Dictionary<string, (string, ModuleLocation)> ModuleIdModuleDirMap { get; set; } = new Dictionary<string, (string, ModuleLocation)>();
+
+        /// <summary>
         /// The static constructor for the program
         /// </summary>
         static Program()
         {
             ApplicationRootPath = GetAppRootPath();
+            // I also need this in the ModuleInstaller class.
+            ModuleInstaller.ApplicationRootPath = ApplicationRootPath;
         }
 
         /// <summary>
@@ -62,10 +65,10 @@ namespace CodeProject.AI.Server
             string assemblyName = (assembly.GetName().Name ?? string.Empty) 
                                 + (SystemInfo.IsWindows? ".exe" : ".dll");
             string companyName  = assembly.GetCustomAttribute<AssemblyCompanyAttribute>()?.Company
-                                ?? "CodeProject";
-            string productCat   = "AI";
+                                ?? Constants.Company;
+            string productCat   = Constants.ProductCategory;
             string productName  = assembly.GetCustomAttribute<AssemblyProductAttribute>()?.Product
-                                ?? "CodeProject.AI Server";
+                                ?? Constants.ProductName;
 
             string servicePath  = Path.Combine(AppContext.BaseDirectory, assemblyName);
             string serviceDesc  = assembly.GetCustomAttribute<AssemblyDescriptionAttribute>()?.Description
@@ -83,9 +86,9 @@ namespace CodeProject.AI.Server
             // lower cased as Linux has case sensitive file names
             string  os           = SystemInfo.OperatingSystem.ToLower();
             string  architecture = SystemInfo.Architecture.ToLower();
-            string? runtimeEnv   = SystemInfo.RuntimeEnvironment == SDK.Common.RuntimeEnvironment.Development
-                                 ? "development" : string.Empty;
-
+            string  edgeDevice   = SystemInfo.EdgeDevice.ToLower().Replace(" ", string.Empty);
+            string? runtimeEnv   = SystemInfo.RuntimeEnvironment == SDK.Utils.RuntimeEnvironment.Development
+                                 ? Constants.Development : string.Empty;
 
             // GetProcessStatus a directory for the given platform that allows modules to store persisted data
             string programDataDir     = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
@@ -145,37 +148,43 @@ namespace CodeProject.AI.Server
                 Console.WriteLine("Unable to create Mutex (but we'll carry on): " + ex.Message);
             }
 
-            if (mutex is not null && !mutex.WaitOne(0))
+            try
             {
-                mutex.Dispose();
-                Console.WriteLine($"{productName} is already running. Exiting.");
+                if (mutex is not null && !mutex.WaitOne(0))
+                {
+                    mutex.Dispose();
+                    Console.WriteLine($"{productName} is already running. Exiting.");
+                    return;
+                }
+            }
+            catch (AbandonedMutexException)
+            {
+                Console.WriteLine($"Looks like {productName} may have exited incorrectly last time. Continuing.");
+            }
+            catch(Exception)
+            {
+                mutex!.Dispose();
+                Console.WriteLine($"Unable to get an exclusive lock for {productName}. It could already be running. Exiting.");
                 return;
             }
 
+            // Make sure any processes that didn't get killed on the Service shutdown are now killed
+            KillOrphanedProcesses();
+
+            // Store this dir in the config settings so we can get to it later.
+            var inMemoryConfigData = new Dictionary<string, string?> {
+                { "ApplicationDataDir", applicationDataDir }
+            };
+
             try
             {
-                // make sure any processes that didn't get killed on the Service shutdown get killed
-                // now.
-                KillOrphanedProcesses();
-
-                // Store this dir in the config settings so we can get to it later.
-                var inMemoryConfigData = new Dictionary<string, string?> {
-                    { "ApplicationDataDir", applicationDataDir }
-                };
-
-                bool reloadConfigOnChange = !SystemInfo.IsDocker;
-
                 // Setup our custom Configuration Loader pipeline and build the configuration.
-                IHost? host = CreateHostBuilder(args)
-                            .ConfigureAppConfiguration(SetupConfigurationLoaders(args, os, architecture,
-                                                                                runtimeEnv, applicationDataDir,
-                                                                                inMemoryConfigData,
-                                                                                reloadConfigOnChange))
-                            .Build()
-                            ;
+                var action = SetupConfigurationLoaders(args, os, architecture, edgeDevice, runtimeEnv,
+                                                       applicationDataDir, inMemoryConfigData);
+                IHostBuilder? hostBuilder = CreateHostBuilder(args).ConfigureAppConfiguration(action);
+                IHost? host = hostBuilder.Build();
 
                 _logger = host.Services.GetService<ILogger<Program>>();
-
                 if (_logger != null)
                 {
                     string systemInfo = SystemInfo.GetSystemInfo();
@@ -191,8 +200,7 @@ namespace CodeProject.AI.Server
                     _logger.LogInformation($"*** STARTING CODEPROJECT.AI SERVER");
                 }
 
-                Task? hostTask;
-                hostTask = host.RunAsync();
+                Task? hostTask = host.RunAsync();
 #if DEBUG
                 try
                 {
@@ -206,6 +214,25 @@ namespace CodeProject.AI.Server
                 await hostTask.ConfigureAwait(false);
 
                 Console.WriteLine("Shutting down");
+            }
+            catch (IOException io_ex)
+            {
+                if (io_ex.Message.Contains("the number of inotify instances has been reached"))
+                {
+                    Console.WriteLine("\n\nUnable to start the server due to too many file " +
+                                      "watchers being in place. This is a system limit. Run\n\n" +
+                                      "   sysctl fs.inotify\n\n to view your machine's limits. " +
+                                      "To change the limits for this session only, run\n\n" +
+                                      "   sudo sysctl fs.inotify.max_user_instances=1024\n\n" +
+                                      "to set the max instance for you to 1024. This may help.");
+                }
+                else
+                {
+                    Console.WriteLine($"\n\nUnable to start the server due to IO error: {io_ex.Message}.");
+                }
+
+                Console.Write("Press Enter to close.");
+                Console.ReadLine();
             }
             catch (Exception ex)
             {
@@ -229,7 +256,7 @@ namespace CodeProject.AI.Server
             // Start from this assembly. We'll work our way up
             string rootPath = AppContext.BaseDirectory;
 
-            // The server (this program) is under /src/server/bin/Debug/net7.0 while debugging, or
+            // The server (this program) is under /src/server/bin/Debug/netX.0 while debugging, or
             // maybe under Release, but when deployed it's simply under /server. 
             // ASSUMPTION: There is no folder called "server" between /server and this assembly.
             // ASSUMPTION: This application was not installed in a folder named 'src'.
@@ -266,7 +293,7 @@ namespace CodeProject.AI.Server
             string offsetDir = SystemInfo.IsDevelopmentCode? "src/" : string.Empty;
             
             // Let's not do this for dev
-            if (SystemInfo.RuntimeEnvironment == CodeProject.AI.SDK.Common.RuntimeEnvironment.Development)
+            if (SystemInfo.RuntimeEnvironment == CodeProject.AI.SDK.Utils.RuntimeEnvironment.Development)
                 return;
 
             if (SystemInfo.IsWindows)
@@ -279,16 +306,45 @@ namespace CodeProject.AI.Server
                     foreach (string dir in directories2del)
                     {
                         string path = Path.Combine(baseDir, offsetDir + dir);
-                        if (Directory.Exists(path))
-                            Directory.Delete(path, true);
+                        try
+                        {
+                            if (Directory.Exists(path))
+                                Directory.Delete(path, true);
+                        }
+                        catch (Exception e)
+                        {
+                            // Handle exception here
+                            Console.WriteLine("Error Deleting files:" + e.Message);
+                        }
                     }
 
                     string logPath = Path.Combine(baseDir, "logs");
-                    if (Directory.Exists(logPath))
-                         Directory.Delete(logPath, true);
+                    try
+                    {
+                        if (Directory.Exists(logPath))
+                            Directory.Delete(logPath, true);
+                    }
+                    catch (Exception e)
+                    {
+                        // Handle exception here
+                        Console.WriteLine("Error deleting log files: " + e.Message);
+                    }
 
-                    if (Directory.Exists(applicationDataDir))
-                        Directory.Delete(applicationDataDir, true);
+                    try
+                    {
+                        if (Directory.Exists(applicationDataDir))
+                        {
+                            // remove all the files except the installconfig.json file
+                            foreach (string filename in Directory.GetFiles(applicationDataDir))
+                                if (filename.EndsWith(InstallConfig.InstallCfgFilename, StringComparison.OrdinalIgnoreCase))
+                                    File.Delete(Path.Combine(filename));
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        // Handle exception here
+                        Console.WriteLine("Error deleting application data directory: " + e.Message);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -307,9 +363,8 @@ namespace CodeProject.AI.Server
             if (!SystemInfo.IsWindows)
                 return;
                 
-            string baseDir   = GetAppRootPath();
-            string offsetDir = SystemInfo.IsDevelopmentCode? "src/" : string.Empty;
-            string scriptDir = Path.Combine(baseDir, offsetDir, "SDK/Scripts/");
+            string baseDir         = GetAppRootPath();
+            string utilsScriptsDir = Path.Combine(baseDir, "devops/utils/");
 
             try
             {
@@ -317,14 +372,14 @@ namespace CodeProject.AI.Server
 
                 ProcessStartInfo procStartInfo;
                 if (SystemInfo.IsWindows)
-                    procStartInfo = new ProcessStartInfo(Path.Combine(scriptDir, "stop_all.bat"));
+                    procStartInfo = new ProcessStartInfo(Path.Combine(utilsScriptsDir, "stop_all.bat"));
                 else if (SystemInfo.IsMacOS)
-                    procStartInfo = new ProcessStartInfo("bash", '"' + Path.Combine(scriptDir, "stop_all.sh") + '"');
+                    procStartInfo = new ProcessStartInfo("bash", '"' + Path.Combine(utilsScriptsDir, "stop_all.sh") + '"');
                 else
-                    procStartInfo = new ProcessStartInfo("bash", Path.Combine(scriptDir, "stop_all.sh"));
+                    procStartInfo = new ProcessStartInfo("bash", Path.Combine(utilsScriptsDir, "stop_all.sh"));
 
                 procStartInfo.UseShellExecute  = false;
-                procStartInfo.WorkingDirectory = Path.GetDirectoryName(scriptDir);
+                procStartInfo.WorkingDirectory = Path.GetDirectoryName(utilsScriptsDir);
                 procStartInfo.CreateNoWindow   = false;
                 procStartInfo.WindowStyle      = ProcessWindowStyle.Hidden;
 
@@ -343,15 +398,18 @@ namespace CodeProject.AI.Server
         /// <param name="args">The command line arguments</param>
         /// <param name="os">The operating system</param>
         /// <param name="architecture">The architecture (x86, arm64 etc)</param>
+        /// <param name="edgeDevice">The system name</param>
         /// <param name="runtimeEnv">Whether this is development or production</param>
         /// <param name="applicationDataDir">The path to the folder containing application data</param>
         /// <param name="inMemoryConfigData">The in-memory config data</param>
-        /// <param name="reloadConfigOnChange">Whether to reload files if they are saved during runtime</param>
-        /// <returns></returns>
+        /// <returns>An Action object</returns>
         private static Action<HostBuilderContext, IConfigurationBuilder> SetupConfigurationLoaders(string[] args,
-            string os, string architecture, string? runtimeEnv, string applicationDataDir,
-            Dictionary<string, string?> inMemoryConfigData, bool reloadConfigOnChange)
+            string os, string architecture, string edgeDevice, string? runtimeEnv,
+            string applicationDataDir, Dictionary<string, string?> inMemoryConfigData)
         {
+            // We don't want to put file watches on files, unless absolutely necessary
+            bool reloadConfigOnChange = false;
+
             return (hostingContext, config) =>
             {
                 // We assume the json files are in the same directory as the main assembly (which
@@ -360,7 +418,7 @@ namespace CodeProject.AI.Server
                 string baseDir = AppContext.BaseDirectory;
 
                 // RemoveProcessStatus the default sources and rebuild it.
-                config.Sources.Clear(); 
+                config.Sources.Clear();
 
                 // add in the default appsettings.json file and its variants
                 // In order
@@ -370,47 +428,15 @@ namespace CodeProject.AI.Server
                 // appsettings.os.development.json
                 // appsettings.os.architecture.json
                 // appsettings.os.architecture.development.json
-                // appsettings.docker.json
-                // appsettings.docker.development.json
+                // appsettings.device.json          device = raspberrypi, orangepi, radxarock, jetson, etc
+                // appsettings.system.development.json
 
-                string settingsFile = Path.Combine(baseDir, "appsettings.json");
-                config.AddJsonFileSafe(settingsFile, optional: false, reloadOnChange: reloadConfigOnChange);
+                AddConfigFileVariations("appsettings", os, architecture, edgeDevice, runtimeEnv, 
+                                        config, reloadConfigOnChange, baseDir, false);
 
-                if (!string.IsNullOrWhiteSpace(runtimeEnv))
-                {
-                    settingsFile = Path.Combine(baseDir, $"appsettings.{runtimeEnv}.json");
-                    config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
-                }
-
-                settingsFile = Path.Combine(baseDir, $"appsettings.{os}.json");
+                // Add the appsettings.install.json file
+                string settingsFile = Path.Combine(baseDir, ModuleInstaller.InstallModulesFileName);
                 config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
-
-                if (!string.IsNullOrWhiteSpace(runtimeEnv))
-                {
-                    settingsFile = Path.Combine(baseDir, $"appsettings.{os}.{runtimeEnv}.json");
-                    config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
-                }
-
-                settingsFile = Path.Combine(baseDir, $"appsettings.{os}.{architecture}.json");
-                config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
-
-                if (!string.IsNullOrWhiteSpace(runtimeEnv))
-                {
-                    settingsFile = Path.Combine(baseDir, $"appsettings.{os}.{architecture}.{runtimeEnv}.json");
-                    config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
-                }
-
-                if (SystemInfo.IsDocker)
-                {
-                    settingsFile = Path.Combine(baseDir, $"appsettings.docker.json");
-                    config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
-
-                    if (!string.IsNullOrWhiteSpace(runtimeEnv))
-                    {
-                        settingsFile = Path.Combine(baseDir, $"appsettings.docker.{runtimeEnv}.json");
-                        config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
-                    }                        
-                }
 
                 // This allows us to add ad-hoc settings such as ApplicationDataDir
                 config.AddInMemoryCollection(inMemoryConfigData);
@@ -423,15 +449,18 @@ namespace CodeProject.AI.Server
                 settingsFile = Path.Combine(baseDir, VersionConfig.VersionCfgFilename);
                 config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
 
+                // Add the modulesettings.json files to get analysis module settings
+                // NOTE: This method will load up the config with the files added above. If you need
+                // to access a config value in AddModulesConfigFiles, ensure that value has been 
+                // added before this point
+                AddModulesConfigurationFiles(config);
+
+                // Add the last saved config values for modules as set by the user
+                AddUserOverrideConfigurationFiles(config, applicationDataDir, runtimeEnv, !SystemInfo.IsLinux);
+
                 // Load the triggers.json file to load the triggers
-                config.AddJsonFileSafe(Path.Combine(baseDir, TriggersConfig.TriggersCfgFilename),
-                                       reloadOnChange: reloadConfigOnChange, optional: true);
-
-                // Load the modulesettings.json files to get analysis module settings
-                LoadModulesConfiguration(config);
-
-                // Load the last saved config values as set by the user
-                LoadUserOverrideConfiguration(config, applicationDataDir, runtimeEnv, reloadConfigOnChange);
+                settingsFile = Path.Combine(baseDir, TriggersConfig.TriggersCfgFilename);
+                config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
 
                 // Load Environment Variables into Configuration
                 config.AddEnvironmentVariables();
@@ -440,144 +469,290 @@ namespace CodeProject.AI.Server
                 if (args != null)
                     config.AddCommandLine(args);
 
+                // Turn off reload on change for Linux
+                if (SystemInfo.IsLinux)
+                {
+                    config.Sources.Where(s => s is FileConfigurationSource).ToList()
+                                  .ForEach(s => ((FileConfigurationSource)s).ReloadOnChange = false);
+                }
+
                 // For debug
                 // ListConfigSources(config.Sources);
                 // ListEnvVariables(Environment.GetEnvironmentVariables());
             };
         }
 
-        // TODO: This does not belong here and should be moved in to a Modules class.
-        // Loading of the module settings should not be done as part of the startup as this means 
-        // modulesettings files can abort the Server startup.
-        // We could:
-        //      - create a separate ConfigurationBuilder
-        //      - clear the configuration sources
-        //      - add the modulesettings files as we do now
-        //      - build a configuration from this builder
-        //      - use this configuration to load the module settings
-        // The module class will have methods and properties to get the ModuleConfigs, and other
-        // things. To be done at a later date.
-        private static void LoadModulesConfiguration(IConfigurationBuilder config)
+        private static void AddConfigFileVariations(string baseFilename, string os, string architecture,
+                                                    string edgeDevice, string? runtimeEnv,
+                                                    IConfigurationBuilder config,
+                                                    bool reloadConfigOnChange, string baseDir,
+                                                    bool rootIsOptional)
         {
-            bool reloadOnChange = !SystemInfo.IsDocker;
+            string settingsFile = Path.Combine(baseDir, $"{baseFilename}.json");
+            config.AddJsonFileSafe(settingsFile, optional: rootIsOptional, reloadOnChange: reloadConfigOnChange);
 
-            IConfiguration configuration = config.Build();
-            (var modulesPath, var preInstalledModulesPath) = EnsureDirectories(configuration);
-
-            // Scan the Modules' directories and add each modulesettings files to the config
-            if (!string.IsNullOrWhiteSpace(modulesPath) && Directory.Exists(modulesPath))
+            if (!string.IsNullOrWhiteSpace(runtimeEnv))
             {
-                var directories = Directory.GetDirectories(modulesPath);
-                foreach (string? directory in directories)
-                    ModuleSettings.LoadModuleSettings(config, directory, reloadOnChange);
+                settingsFile = Path.Combine(baseDir, $"{baseFilename}.{runtimeEnv}.json");
+                config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
             }
 
-            // Scan the pre-installed Modules' directories and add each modulesettings files
-            if (!string.IsNullOrWhiteSpace(preInstalledModulesPath) && Directory.Exists(preInstalledModulesPath))
+            settingsFile = Path.Combine(baseDir, $"{baseFilename}.{os}.json");
+            config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+
+            if (!string.IsNullOrWhiteSpace(runtimeEnv))
             {
-                var directories = Directory.GetDirectories(preInstalledModulesPath);
-                foreach (string? directory in directories)
-                    ModuleSettings.LoadModuleSettings(config, directory, reloadOnChange);
+                settingsFile = Path.Combine(baseDir, $"{baseFilename}.{os}.{runtimeEnv}.json");
+                config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+            }
+
+            settingsFile = Path.Combine(baseDir, $"{baseFilename}.{os}.{architecture}.json");
+            config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+
+            if (!string.IsNullOrWhiteSpace(runtimeEnv))
+            {
+                settingsFile = Path.Combine(baseDir, $"{baseFilename}.{os}.{architecture}.{runtimeEnv}.json");
+                config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+            }
+
+            if (!string.IsNullOrWhiteSpace(edgeDevice))
+            {
+                settingsFile = Path.Combine(baseDir, $"{baseFilename}.{edgeDevice}.json");
+                config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+
+                if (!string.IsNullOrWhiteSpace(runtimeEnv))
+                {
+                    settingsFile = Path.Combine(baseDir, $"{baseFilename}.{edgeDevice}.{runtimeEnv}.json");
+                    config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadConfigOnChange);
+                }
             }
         }
 
-        private static (string?,string?) EnsureDirectories(IConfiguration configuration)
+        /// <summary>
+        /// Adds the configuration files for each module to the config tree
+        /// </summary>
+        /// <remarks>
+        /// TODO: This does not belong here and should be moved in to a Modules class. Loading of
+        /// the module settings should not be done as part of the startup as this means modulesettings
+        /// files can abort the Server startup. We could:
+        ///   - create a separate ConfigurationBuilder
+        ///   - clear the configuration sources
+        ///   - add the modulesettings files as we do now
+        ///   - build a configuration from this builder
+        ///   - use this configuration to load the module settings
+        /// The module class will have methods and properties to get the ModuleConfigs, and other
+        /// things. To be done at a later date.
+        /// </remarks>
+        private static void AddModulesConfigurationFiles(IConfigurationBuilder config)
+        {           
+            bool reloadOnChange = !SystemInfo.IsDocker;
+
+            // Load up the files already added to the config (just server settings) so we can query
+            // the values and set things up
+            IConfiguration configuration = config.Build();
+
+            (var modulesDirPath, 
+             var preInstalledModulesDirPath,
+             var demoModulesDirPath,
+             var externalModulesDirPath) = EnsureDirectories(configuration);
+
+            // Scan the Modules' directories and add each modulesettings files to the config
+            if (!string.IsNullOrWhiteSpace(modulesDirPath) && Directory.Exists(modulesDirPath))
+            {                
+                var directories = Directory.GetDirectories(modulesDirPath);
+                foreach (string? directory in directories)
+                {
+                    // Bad assumption: A module's ID is same as the name of folder in which it lives.
+                    // string? moduleId = new DirectoryInfo(directory).Name;
+
+                    string? moduleId = ModuleConfigExtensions.GetModuleIdFromModuleSettings(directory);
+                    if (moduleId is null || ModuleIdModuleDirMap.ContainsKey(moduleId))
+                        continue;
+
+                    // Check the modulesettings file and, if necessary, reformat it
+                    ModuleConfigExtensions.RewriteOldModuleSettingsFile(directory);
+
+                    // Load up (existing, or potentially updated) settings
+                    config.AddModuleSettingsConfigFiles(directory, reloadOnChange);
+
+                    ModuleIdModuleDirMap.Add(moduleId, (directory, ModuleLocation.Internal));
+                }
+            }
+
+            // Scan the pre-installed Modules' directories and add each modulesettings files
+            if (!string.IsNullOrWhiteSpace(preInstalledModulesDirPath) && 
+                Directory.Exists(preInstalledModulesDirPath))
+            {
+                var directories = Directory.GetDirectories(preInstalledModulesDirPath);
+                foreach (string? directory in directories)
+                {
+                    // Bad assumption: A module's ID is same as the name of folder in which it lives.
+                    // string? moduleId = new DirectoryInfo(directory).Name;
+
+                    string? moduleId = ModuleConfigExtensions.GetModuleIdFromModuleSettings(directory);
+                    if (moduleId is null || ModuleIdModuleDirMap.ContainsKey(moduleId))
+                        continue;
+
+                    config.AddModuleSettingsConfigFiles(directory, reloadOnChange);
+                    ModuleIdModuleDirMap.Add(moduleId, (directory, ModuleLocation.PreInstalled));
+                }
+            }
+
+            // Scan the external Modules' directories and add each modulesettings files
+            if (!string.IsNullOrWhiteSpace(externalModulesDirPath) && 
+                Directory.Exists(externalModulesDirPath))
+            {
+                var directories = Directory.GetDirectories(externalModulesDirPath);
+                foreach (string? directory in directories)
+                {
+                    // Bad assumption: A module's ID is same as the name of folder in which it lives.
+                    // string? moduleId = new DirectoryInfo(directory).Name;
+
+                    string? moduleId = ModuleConfigExtensions.GetModuleIdFromModuleSettings(directory);
+                    if (moduleId is null || ModuleIdModuleDirMap.ContainsKey(moduleId))
+                        continue;
+
+                    config.AddModuleSettingsConfigFiles(directory, reloadOnChange);
+                    ModuleIdModuleDirMap.Add(moduleId, (directory, ModuleLocation.External));
+                }
+            }
+
+            // Finally, scan the demo Modules' directories and add each modulesettings files
+            if (!string.IsNullOrWhiteSpace(demoModulesDirPath) && Directory.Exists(demoModulesDirPath))
+            {
+                var directories = Directory.GetDirectories(demoModulesDirPath);
+                foreach (string? directory in directories)
+                {
+                    // Bad assumption: A module's ID is same as the name of folder in which it lives.
+                    // string? moduleId = new DirectoryInfo(directory).Name;
+
+                    string? moduleId = ModuleConfigExtensions.GetModuleIdFromModuleSettings(directory);
+                    if (moduleId is null || ModuleIdModuleDirMap.ContainsKey(moduleId))
+                        continue;
+
+                    config.AddModuleSettingsConfigFiles(directory, reloadOnChange);
+                    ModuleIdModuleDirMap.Add(moduleId, (directory, ModuleLocation.Demos));
+                }
+            }
+        }
+
+        private static (string?,string?, string?, string?) EnsureDirectories(IConfiguration configuration)
         {
             string rootPath = GetAppRootPath();
             if (string.IsNullOrWhiteSpace(rootPath))
             {
                 Console.WriteLine("No root path provided");
-                return (null, null);
+                return (null, null, null, null);
             }
 
             if (!Directory.Exists(rootPath))
             {
                 Console.WriteLine($"The provided root path '{rootPath}' doesn't exist");
-                return (null, null);
+                return (null, null, null, null);
             }
 
-            var moduleOptions                  = configuration.GetSection("ModuleOptions");
-            string? runtimesPath               = moduleOptions["RuntimesPath"];
-            string? modulesPath                = moduleOptions["ModulesPath"];
-            string? preInstalledModulesPath    = moduleOptions["PreInstalledModulesPath"];
-            string? downloadedPackagesPath     = moduleOptions["DownloadedModulePackagesPath"];
-            string? moduleInstallerScriptsPath = moduleOptions["ModuleInstallerScriptsPath"];
+            var moduleOptions                     = configuration.GetSection("ModuleOptions");
+            string? runtimesDirPath               = moduleOptions["runtimesDirPath"];
+            string? modulesDirPath                = moduleOptions["modulesDirPath"];
+            string? preInstalledModulesDirPath    = moduleOptions["PreInstalledModulesDirPath"];
+            string? demoModulesDirPath            = moduleOptions["DemoModulesDirPath"];
+            string? externalModulesDirPath        = moduleOptions["ExternalModulesDirPath"];
+            string? downloadedModulesDirPath      = moduleOptions["DownloadedModulePackagesDirPath"];
+            string? downloadedModelsDirPath       = moduleOptions["DownloadedModelsPackagesDirPath"];
+            string? moduleInstallerScriptsDirPath = moduleOptions["ModuleInstallerScriptsDirPath"];
 
             // make sure that all the require paths are defined
-            if (string.IsNullOrWhiteSpace(runtimesPath))
+            if (string.IsNullOrWhiteSpace(runtimesDirPath))
             {
                 Console.WriteLine("No runtime path provided");
-                return (null, null);
+                return (null, null, null, null);
             }
 
-            if (string.IsNullOrWhiteSpace(modulesPath))
+            if (string.IsNullOrWhiteSpace(modulesDirPath))
             {
                 Console.WriteLine("No modules path provided");
-                return (null, null);
+                return (null, null, null, null);
             }
 
-            if (string.IsNullOrWhiteSpace(downloadedPackagesPath))
+            if (string.IsNullOrWhiteSpace(downloadedModulesDirPath))
             {
                 Console.WriteLine("No downloaded module Packages path provided");
-                return (null, null);
+                return (null, null, null, null);
             }
 
-            if (string.IsNullOrWhiteSpace(moduleInstallerScriptsPath))
+            if (string.IsNullOrWhiteSpace(downloadedModelsDirPath))
+            {
+                Console.WriteLine("No downloaded model Packages path provided");
+                return (null, null, null, null);
+            }
+
+            if (string.IsNullOrWhiteSpace(moduleInstallerScriptsDirPath))
             {
                 Console.WriteLine("No modules Installer path provided");
-                return (null, null);
+                return (null, null, null, null);
             }
 
             // get the full paths
-            runtimesPath               = Text.FixSlashes(runtimesPath?.Replace("%ROOT_PATH%", rootPath));
-            runtimesPath               = Path.GetFullPath(runtimesPath);
-            downloadedPackagesPath     = Text.FixSlashes(downloadedPackagesPath?.Replace("%ROOT_PATH%", rootPath));
-            downloadedPackagesPath     = Path.GetFullPath(downloadedPackagesPath);
-            moduleInstallerScriptsPath = Text.FixSlashes(moduleInstallerScriptsPath?.Replace("%ROOT_PATH%", rootPath));
-            moduleInstallerScriptsPath = Path.GetFullPath(moduleInstallerScriptsPath);
-            modulesPath                = Text.FixSlashes(modulesPath?.Replace("%ROOT_PATH%", rootPath));
-            modulesPath                = Path.GetFullPath(modulesPath);
-            preInstalledModulesPath    = Text.FixSlashes(preInstalledModulesPath?.Replace("%ROOT_PATH%", rootPath));
-            preInstalledModulesPath    = Path.GetFullPath(preInstalledModulesPath);
+            runtimesDirPath               = Text.FixSlashes(runtimesDirPath?.Replace("%ROOT_PATH%", rootPath));
+            runtimesDirPath               = Path.GetFullPath(runtimesDirPath);
+            downloadedModulesDirPath      = Text.FixSlashes(downloadedModulesDirPath?.Replace("%ROOT_PATH%", rootPath));
+            downloadedModelsDirPath       = Text.FixSlashes(downloadedModelsDirPath?.Replace("%ROOT_PATH%", rootPath));
+            moduleInstallerScriptsDirPath = Text.FixSlashes(moduleInstallerScriptsDirPath?.Replace("%ROOT_PATH%", rootPath));
+            moduleInstallerScriptsDirPath = Path.GetFullPath(moduleInstallerScriptsDirPath);
+            modulesDirPath                = Text.FixSlashes(modulesDirPath?.Replace("%ROOT_PATH%", rootPath));
+            modulesDirPath                = Path.GetFullPath(modulesDirPath);
+            preInstalledModulesDirPath    = Text.FixSlashes(preInstalledModulesDirPath?.Replace("%ROOT_PATH%", rootPath));
+            preInstalledModulesDirPath    = Path.GetFullPath(preInstalledModulesDirPath);
+            demoModulesDirPath            = Text.FixSlashes(demoModulesDirPath?.Replace("%ROOT_PATH%", rootPath));
+            demoModulesDirPath            = Path.GetFullPath(demoModulesDirPath);
+            externalModulesDirPath        = Text.FixSlashes(externalModulesDirPath?.Replace("%ROOT_PATH%", rootPath));
+            if (!string.IsNullOrWhiteSpace(externalModulesDirPath))
+                externalModulesDirPath    = Path.GetFullPath(externalModulesDirPath);
 
             // create the directories if the don't exist
-            if (!Directory.Exists(runtimesPath))
+            if (!Directory.Exists(runtimesDirPath))
             {
-                Console.WriteLine($"Creating runtimes path '{runtimesPath}'");
-                Directory.CreateDirectory(runtimesPath);
+                Console.WriteLine($"Creating runtimes path '{runtimesDirPath}'");
+                Directory.CreateDirectory(runtimesDirPath);
             }
 
-            if (!Directory.Exists(downloadedPackagesPath))
+            if (!Directory.Exists(downloadedModulesDirPath))
             {
-                Console.WriteLine($"Creating downloaded modules package path '{downloadedPackagesPath}'");
-                Directory.CreateDirectory(downloadedPackagesPath);
+                Console.WriteLine($"Creating downloaded modules package path '{downloadedModulesDirPath}'");
+                Directory.CreateDirectory(downloadedModulesDirPath);
             }
 
-            if (!Directory.Exists(moduleInstallerScriptsPath))
+            if (!Directory.Exists(downloadedModelsDirPath))
             {
-                Console.WriteLine($"Creating modules installer path '{moduleInstallerScriptsPath}'");
-                Directory.CreateDirectory(moduleInstallerScriptsPath);
+                Console.WriteLine($"Creating downloaded models path '{downloadedModelsDirPath}'");
+                Directory.CreateDirectory(downloadedModelsDirPath);
             }
 
-            if (!Directory.Exists(modulesPath))
+            if (!Directory.Exists(moduleInstallerScriptsDirPath))
             {
-                Console.WriteLine($"Creating modules path '{modulesPath}'");
-                Directory.CreateDirectory(modulesPath);
+                Console.WriteLine($"Creating modules installer path '{moduleInstallerScriptsDirPath}'");
+                Directory.CreateDirectory(moduleInstallerScriptsDirPath);
+            }
+
+            if (!Directory.Exists(modulesDirPath))
+            {
+                Console.WriteLine($"Creating modules path '{modulesDirPath}'");
+                Directory.CreateDirectory(modulesDirPath);
             }
 
             var srcPath = Path.Combine(rootPath, "src");
 
             // copy over the SDK if required.
-            if (SystemInfo.IsDevelopmentCode && !srcPath.EqualsIgnoreCase(moduleInstallerScriptsPath))
+            if (SystemInfo.IsDevelopmentCode && !srcPath.EqualsIgnoreCase(moduleInstallerScriptsDirPath))
             {
                 Console.WriteLine("Copying SDK and Setup Scripts");
 
-                File.Copy(Path.Combine(srcPath, "setup.bat"), Path.Combine(moduleInstallerScriptsPath, "setup.bat"), true);
-                File.Copy(Path.Combine(srcPath, "setup.sh"),  Path.Combine(moduleInstallerScriptsPath, "setup.sh"), true);
-                CopyDirectory(Path.Combine(srcPath, "SDK"),   Path.Combine(moduleInstallerScriptsPath, "SDK"), true);
+                File.Copy(Path.Combine(srcPath, "setup.bat"), Path.Combine(moduleInstallerScriptsDirPath, "setup.bat"), true);
+                File.Copy(Path.Combine(srcPath, "setup.sh"),  Path.Combine(moduleInstallerScriptsDirPath, "setup.sh"), true);
+                CopyDirectory(Path.Combine(srcPath, "SDK"),   Path.Combine(moduleInstallerScriptsDirPath, "SDK"), true);
             }
 
-            return (modulesPath, preInstalledModulesPath);
+            return (modulesDirPath, preInstalledModulesDirPath, demoModulesDirPath, externalModulesDirPath);
         }
 
         private static void CopyDirectory(string sourceDir, string destinationDir, bool recursive)
@@ -614,15 +789,15 @@ namespace CodeProject.AI.Server
         }
 
         /// <summary>
-        /// Loads the last-saved user configuration file
+        /// Adds the last-saved user configuration files to the configuration
         /// </summary>
         /// <param name="config"></param>
         /// <param name="applicationDataDir">The directory containing the persisted user data</param>
         /// <param name="runtimeEnv">The current runtime environment (production or development)</param>
         /// <param name="reloadOnChange">Whether to reload the config files if they change</param>
-        private static void LoadUserOverrideConfiguration(IConfigurationBuilder config, 
-                                                          string applicationDataDir, 
-                                                          string? runtimeEnv, bool reloadOnChange)
+        private static void AddUserOverrideConfigurationFiles(IConfigurationBuilder config, 
+                                                              string applicationDataDir, 
+                                                              string? runtimeEnv, bool reloadOnChange)
         {
             if (string.IsNullOrWhiteSpace(applicationDataDir))
             {
@@ -632,20 +807,61 @@ namespace CodeProject.AI.Server
 
             if (!Directory.Exists(applicationDataDir))
             {
-                Console.WriteLine($"The provided application data directory path '{applicationDataDir}' doesn't exist");
-                return;
+                Console.WriteLine($"The provided application data directory path '{applicationDataDir}' doesn't exist. Creating ...");
+                try
+                {
+                    Directory.CreateDirectory(applicationDataDir);
+                }
+                catch
+                {
+                    Console.WriteLine("Unable to create app data directory");
+                    return;
+                }
             }
 
             runtimeEnv = runtimeEnv?.ToLower();
 
-            // For now, we'll store ALL module settings in the same file
-            string settingsFile = Path.Combine(applicationDataDir, "modulesettings.json");
+            // The user-overridden settings for each module are combined into a single
+            // modulesettings.json file
+            ModuleConfigExtensions.RewriteOldUserModuleSettingsFile(applicationDataDir); // rewrite if needed
+            string settingsFile = Path.Combine(applicationDataDir, Constants.ModuleSettingsFilename);
             config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadOnChange);
 
-            if (!string.IsNullOrEmpty(runtimeEnv))
+            // ...but we have separate production and development files.
+            if (runtimeEnv.EqualsIgnoreCase(Constants.Development))
             {
-                settingsFile = Path.Combine(applicationDataDir, $"modulesettings.{runtimeEnv}.json");
+                ModuleConfigExtensions.RewriteOldUserModuleSettingsFile(applicationDataDir); // rewrite if needed
+                settingsFile = Path.Combine(applicationDataDir, Constants.DevModuleSettingsFilename);
                 config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: reloadOnChange);
+            }
+
+            // We store any updates to server (including mesh) settings in a separate file
+            settingsFile = Path.Combine(applicationDataDir, Constants.ServerSettingsFilename);
+            // If the file doesn't exist, create it with an empty object
+            WriteEmptyConfigFileIfMissing(settingsFile);
+            config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: true);
+
+            if (runtimeEnv.EqualsIgnoreCase(Constants.Development))
+            {
+                settingsFile = Path.Combine(applicationDataDir, Constants.DevServerSettingsFilename);
+                // If the file doesn't exist, create it with an empty object
+                WriteEmptyConfigFileIfMissing(settingsFile);
+                config.AddJsonFileSafe(settingsFile, optional: true, reloadOnChange: true);
+            }
+        }
+
+        private static void WriteEmptyConfigFileIfMissing(string settingsFile)
+        {
+            if (File.Exists(settingsFile))
+                return;
+
+            try
+            {
+                File.WriteAllText(settingsFile, "{}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Unable to create empty config file '{settingsFile}': {ex.Message}");
             }
         }
 
@@ -683,7 +899,7 @@ namespace CodeProject.AI.Server
                                 // Listen on the port that the appsettings defines (we force the
                                 // use of the default port. IsPortAvailable can sometimes be too
                                 // conservative)
-                                if (_port == defaultPort || IsPortAvailable(_port))
+                                if (_port == Constants.DefaultPort || IsPortAvailable(_port))
                                 {
                                     Console.WriteLine($"Server is listening on port {_port}");
                                     serverOptions.Listen(anyAddress, _port);
@@ -692,13 +908,13 @@ namespace CodeProject.AI.Server
 
                                 // If we aren't listening to the default port (32168), then listen
                                 // to it! (and don't bother asking if it's available. Just try it.)
-                                if (_port != defaultPort /* && IsPortAvailable(defaultPort)*/)
+                                if (_port != Constants.DefaultPort /* && IsPortAvailable(Constants.DefaultPort)*/)
                                 {
                                     if (!foundPort)
-                                        _port = defaultPort;
+                                        _port = Constants.DefaultPort;
 
                                     Console.WriteLine($"Server is listening on default port {_port}");
-                                    serverOptions.Listen(anyAddress, defaultPort);
+                                    serverOptions.Listen(anyAddress, Constants.DefaultPort);
                                     foundPort = true;
                                 }
 
@@ -707,26 +923,28 @@ namespace CodeProject.AI.Server
                                     // Add some legacy ports. First macOS (port 5500)
                                     if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
                                     {
-                                        if (_port != legacyPortOsx && IsPortAvailable(legacyPortOsx))
+                                        if (_port != Constants.LegacyPortOsx &&
+                                            IsPortAvailable(Constants.LegacyPortOsx))
                                         {
                                             if (!foundPort)
-                                                _port = legacyPortOsx;
+                                                _port = Constants.LegacyPortOsx;
                                         
-                                            Console.WriteLine($"Server is also listening on legacy port {legacyPortOsx}");
-                                            serverOptions.Listen(anyAddress, legacyPortOsx);
+                                            Console.WriteLine($"Server is also listening on legacy port {Constants.LegacyPortOsx}");
+                                            serverOptions.Listen(anyAddress, Constants.LegacyPortOsx);
                                             foundPort = true;
                                         }
                                     }
                                     // Then everything else (port 5000)
                                     else
                                     {
-                                        if (_port != legacyPort && IsPortAvailable(legacyPort))
+                                        if (_port != Constants.LegacyPort &&
+                                            IsPortAvailable(Constants.LegacyPort))
                                         {
                                             if (!foundPort)
-                                                _port = legacyPort;
+                                                _port = Constants.LegacyPort;
                                         
-                                            Console.WriteLine($"Server is also listening on legacy port {legacyPort}");
-                                            serverOptions.Listen(anyAddress, legacyPort);
+                                            Console.WriteLine($"Server is also listening on legacy port {Constants.LegacyPort}");
+                                            serverOptions.Listen(anyAddress, Constants.LegacyPort);
                                             foundPort = true;
                                         }
                                     }
@@ -756,8 +974,6 @@ namespace CodeProject.AI.Server
                                        .AddFilter("System", LogLevel.Warning)
                                        .AddServerLogger(configuration =>
                                        {
-                                            // Replace warning value from appsettings.json of "Cyan"
-                                            // configuration.LogLevels[LogLevel.Warning] = ConsoleColor.DarkCyan;
                                             // Replace warning value from appsettings.json of "Red"
                                             // configuration.LogLevels[LogLevel.Error] = ConsoleColor.DarkRed;
                                         });
@@ -784,9 +1000,9 @@ namespace CodeProject.AI.Server
             IPGlobalProperties ipGlobalProperties = IPGlobalProperties.GetIPGlobalProperties();
             TcpConnectionInformation[] tcpConnInfoArray = ipGlobalProperties.GetActiveTcpConnections();
 
-            foreach (TcpConnectionInformation tcpi in tcpConnInfoArray)
+            foreach (TcpConnectionInformation tcpInfo in tcpConnInfoArray)
             {
-                if (tcpi.LocalEndPoint.Port == port)
+                if (tcpInfo.LocalEndPoint.Port == port)
                 {
                     isAvailable = false;
                     break;
@@ -863,10 +1079,10 @@ namespace CodeProject.AI.Server
         }
 
         /// <summary>
-        /// Opens the default browser on the given system with the given url.
-        /// To be tested, and if there are issues, see also https://stackoverflow.com/a/53570859
+        /// Opens the default browser on the given system with the given url. To be tested. If there
+        /// are issues, see also https://stackoverflow.com/a/53570859
         /// </summary>
-        /// <param name="url"></param>
+        /// <param name="url">The URL to open</param>
         public static void OpenBrowser(string url)
         {
             // HACK: Read this: https://github.com/dotnet/corefx/issues/10361 and 
@@ -903,7 +1119,6 @@ namespace CodeProject.AI.Server
                 {
                     // Process.Start("open", url);
                     Process.Start("sensible-browser", url);
-
                 }
                 else
                 {

@@ -1,8 +1,0 @@
-{
-  "Modules": {
-    "PortraitFilter": {
-      "Runtime": "dotnet",
-      "FilePath": "PortraitFilter.dll"
-    }
-  }
-}

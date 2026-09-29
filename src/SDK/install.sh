@@ -2,13 +2,16 @@
 
 # Setup script :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 #
-#                            CodeProject.AI Server
+#                        CodeProject.AI SDK Setup
 #
 # This script is called from the SDK directory using: 
 #
-#    bash ../../setup.sh
+#    bash ../setup.sh
 #
 # The setup.sh file will find this install.sh file and execute it.
+#
+# For help with install scripts, notes on variables and methods available, tips,
+# and explanations, see /src/modules/install_script_help.md
 
 if [ "$1" != "install" ]; then
     echo
@@ -17,163 +20,126 @@ if [ "$1" != "install" ]; then
     exit 1 
 fi
 
-#verbosity="info"
-# Setup libs required by a bunch of things we'll eventually need
-
+# Setup anything required for the general SDK (libs and install scripts) to work
+ 
 # Install required libraries --------------------------------------------------
 
-if [ "$os" == "linux" ]; then
+if [ "$os" = "linux" ]; then
 
-    # Need to add the noise level toggling:
-    #
-    # if [ "${verbosity}" == "quiet" ]; then
-    #     write "Installing glxinfo so we can query GPU information..."
-    #     sudo apt install mesa-utils >/dev/null 2>/dev/null &
-    #     spin $!
-    # else
-    # etc...
-
-    # "libstdc++.so.6: version `GLIBCXX_3.4.20' not found"
-    # https://stackoverflow.com/a/46613656
-    if [ "${verbosity}" == "quiet" ]; then
+    if [ "$os_name" = "ubuntu" ]; then # Not for debian
+        # "libstdc++.so.6: version `GLIBCXX_3.4.20' not found" -  https://stackoverflow.com/a/46613656
         write "Adding toolchain repo..." $color_primary
-        add-apt-repository ppa:ubuntu-toolchain-r/test -y >/dev/null 2>/dev/null &
-        spin $!
-        writeLine "Done" $color_success
-        
-        installAptPackages "gcc-4.9 apt-utils"
+        apt policy 2>/dev/null | grep ubuntu-toolchain >/dev/null 2>/dev/null
+        if [ "$?" != 0 ]; then
 
-        write "Upgrading libstdc..." $color_primary
-        apt-get upgrade libstdc++6 -y >/dev/null 2>/dev/null &
-        spin $!
-        writeLine "Done" $color_success
-    else
-        add-apt-repository ppa:ubuntu-toolchain-r/test -y 
-        installAptPackages "gcc-4.9 apt-utils"
-        apt-get upgrade libstdc++6 -y
+            # output a warning message if no admin rights and instruct user on manual steps
+            install_instructions="cd ${sdkPath}${newline}sudo bash ../setup.sh"
+            checkForAdminAndWarn "$install_instructions"
+
+            if [ "$isAdmin" = true ] || [ "$attemptSudoWithoutAdminRights" = true ]; then
+                if [ "${verbosity}" = "quiet" ]; then
+                    sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y >/dev/null 2>/dev/null &
+                    spin $!
+                else
+                    sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+                fi
+            fi
+            
+            writeLine "done" $color_success
+        else
+            writeLine "Already added" $color_success
+        fi
     fi
-
-    # Make a list of the packages we need installed
-    packages=""
-
+    
+    installAptPackages "apt-utils"
+    
     # - These libraries are needed for System.Drawing to work on Linux in NET 7
     # - libfontconfig1 is required for SkiaSharp
     # - libc6-dev, libgdplus is required for System.Drawing
-    packages="${packages} ca-certificates gnupg libc6-dev libfontconfig1 libgdiplus libjpeg-dev zlib1g-dev"
+    packages="ca-certificates gnupg libc6-dev libfontconfig1 libgdiplus libjpeg-dev zlib1g-dev"
     installAptPackages "${packages}"
 
     # - Needed for opencv-python (TODO: review these and move into module installers that actually use OpenCV)
     packages="ffmpeg libsm6 libxext6"
-    # - So we can query glxinfo for GPU info (mesa) and install modules (the rest)
+    # - So we can query glxinfo for GPU info (mesa) and install modules (the rest).
+    # NOTE: The general setup.sh file should have already installed curl and wget
     packages="${packages} mesa-utils curl rsync unzip wget"
     installAptPackages "${packages}"
 
 else
-    if [ "${verbosity}" == "quiet" ]; then
-        write "Installing System.Drawing support "
+    if [ "${verbosity}" = "quiet" ]; then
 
-        if [ $"$architecture" == 'arm64' ]; then
-            arch -x86_64 /usr/local/bin/brew install fontconfig  >/dev/null 2>/dev/null &
+        if [ "$os_code_name" = "Big Sur" ]; then   # macOS 11.x on Intel, kernal 20.x
+            writeLine "** Installing System.Drawing support. On macOS 11 this could take a looong time" "$color_warn"
+        else
+            write "Installing System.Drawing support "
+        fi
+
+        if [ "$architecture" = 'arm64' ]; then
+            arch -x86_64 /usr/local/bin/brew list fontconfig >/dev/null 2>/dev/null || \
+                arch -x86_64 /usr/local/bin/brew install fontconfig  >/dev/null 2>/dev/null &
             spin $!
             # brew install mono-libgdiplus  >/dev/null 2>/dev/null &
-            arch -x86_64 /usr/local/bin/brew install libomp  >/dev/null 2>/dev/null &
+            arch -x86_64 /usr/local/bin/brew list libomp >/dev/null 2>/dev/null || \
+                arch -x86_64 /usr/local/bin/brew install libomp >/dev/null 2>/dev/null &
             spin $!
         else
-            brew install fontconfig  >/dev/null 2>/dev/null &
+            brew list fontconfig  >/dev/null 2>/dev/null || brew install fontconfig  >/dev/null 2>/dev/null &
             spin $!
             # brew install mono-libgdiplus  >/dev/null 2>/dev/null &
-            brew install libomp  >/dev/null 2>/dev/null &
+            brew list libomp  >/dev/null 2>/dev/null || brew install libomp  >/dev/null 2>/dev/null &
             spin $!
         fi
 
-        writeLine "Done" $color_success
+        writeLine "done" $color_success
     else
         writeLine "Installing System.Drawing support "
 
-        if [ $"$architecture" == 'arm64' ]; then
-            arch -x86_64 /usr/local/bin/brew install fontconfig
-            arch -x86_64 /usr/local/bin/brew install libomp
+        if [ "$architecture" = 'arm64' ]; then
+            arch -x86_64 /usr/local/bin/brew list fontconfig || arch -x86_64 /usr/local/bin/brew install fontconfig
+            arch -x86_64 /usr/local/bin/brew list libomp     || arch -x86_64 /usr/local/bin/brew install libomp
         else
-            brew install fontconfig
-            brew install libomp
+            brew list fontconfig || brew install fontconfig
+            brew list libomp     || brew install libomp
         fi
         
-        writeLine "Done" $color_success
+        writeLine "done" $color_success
     fi
 fi
 
 # .NET -------------------------------------------------------------------------
 
-# Setup .NET for the server and any .NET modules that may need it
-setupDotNet 7.0
-if [ $? -ne 0 ]; then quit 1; fi
+# Setup .NET for the server, the SDK Utilities, and any .NET modules that may 
+# need it
+if [ "$executionEnvironment" = "Development" ]; then
+    setupDotNet "$dotNetRuntimeVersion" "aspnetcore"
+    setupDotNet "$dotNetSDKVersion" "sdk"
+else
+    setupDotNet "$dotNetRuntimeVersion" "aspnetcore"
+fi
+
+if [ $? -ne 0 ]; then
+    writeLine "Failed to install .NET" $color_error
+    quit 1
+fi
 
 
 # CUDA -------------------------------------------------------------------------
 
-# BEFORE WE START: Ensure CUDA and cuDNN is installed. Note this is only for 
-# native linux since macOS no longer supports NVIDIA, and docker images and
-# Jetson already contain the  necessary SDKs and libraries.
-# We install CUDA now so that any installs down the track can take into account
-# the presence of CUDA for install selection
-if [ "$hasCUDA" == "true" ] && [ "${inDocker}" == "false" ] && [ "${systemName}" != "Jetson" ]; then
-    correctLineEndings "${sdkScriptsPath}/install_cuDNN.sh"
-    source "${sdkScriptsPath}/install_cuDNN.sh"
+if [ "${edgeDevice}" = "Jetson" ]; then
+    echo ${PATH} | grep /usr/bin/cuda/bin >/dev/null 2>/dev/null
+    if [ "$?" = "1" ] && [ -d "/usr/bin/cuda/bin" ]; then 
+        export PATH=${PATH};/usr/bin/cuda/bin
+    fi
+    
+    echo ${LD_LIBRARY_PATH} | grep /usr/local/lib64 >/dev/null 2>/dev/null
+    if [ "$?" = "1" ] && [ -d "/usr/local/lib64" ]; then 
+        export LD_LIBRARY_PATH=${LD_LIBRARY_PATH};/usr/local/lib64
+    fi
+    
+    source ~/.bashrc
 fi
 
 
-#                         -- Install script cheatsheet -- 
-#
-# Variables available:
-#
-#  absoluteRootDir       - the root path of the installation (eg: ~/CodeProject/AI)
-#  sdkScriptsPath        - the path to the installation utility scripts ($rootPath/SDK/Scripts)
-#  downloadPath          - the path to where downloads will be stored ($sdkScriptsPath/downloads)
-#  runtimesPath          - the path to the installed runtimes ($rootPath/src/runtimes)
-#  modulesPath           - the path to all the AI modules ($rootPath/src/modules)
-#  moduleDir             - the name of the directory containing this module
-#  modulePath            - the path to this module ($modulesPath/$moduleDir)
-#  os                    - "linux" or "macos"
-#  architecture          - "x86_64" or "arm64"
-#  platform              - "linux", "linux-arm64", "macos" or "macos-arm64"
-#  systemName            - General name for the system. "Linux", "macOS", "Raspberry Pi", "Orange Pi"
-#                          "Jetson" or "Docker"
-#  verbosity             - quiet, info or loud. Use this to determines the noise level of output.
-#  forceOverwrite        - if true then ensure you force a re-download and re-copy of downloads.
-#                          getFromServer will honour this value. Do it yourself for downloadAndExtract 
-#
-# Methods available
-#
-#  write     text [foreground [background]] (eg write "Hi" "green")
-#  writeLine text [foreground [background]]
-#  Download  storageUrl downloadPath filename moduleDir message
-#        storageUrl    - Url that holds the compressed archive to Download
-#        downloadPath  - Path to where the downloaded compressed archive should be downloaded
-#        filename      - Name of the compressed archive to be downloaded
-#        dirNameToSave - name of directory, relative to downloadPath, where contents of archive 
-#                        will be extracted and saved
-#
-#  getFromServer filename moduleAssetDir message
-#        filename       - Name of the compressed archive to be downloaded
-#        moduleAssetDir - Name of folder in module's directory where archive will be extracted
-#        message        - Message to display during download
-#
-#  downloadAndExtract  storageUrl filename downloadPath dirNameToSave message
-#        storageUrl    - Url that holds the compressed archive to Download
-#        filename      - Name of the compressed archive to be downloaded
-#        downloadPath  - Path to where the downloaded compressed archive should be downloaded
-#        dirNameToSave - name of directory, relative to downloadPath, where contents of archive 
-#                        will be extracted and saved
-#        message       - Message to display during download
-#
-#  setupPython Version [install-location]
-#       Version - version number of python to setup. 3.8 and 3.9 currently supported. A virtual
-#                 environment will be created in the module's local folder if install-location is
-#                 "Local", otherwise in $runtimesPath/bin/$platform/python<version>/venv.
-#       install-location - [optional] "Local" or "Shared" (see above)
-#
-#  installPythonPackages Version requirements-file-directory
-#       Version - version number, as per SetupPython
-#       requirements-file-directory - directory containing the requirements.txt file
-#       install-location - [optional] "Local" (installed in the module's local venv) or 
-#                          "Shared" (installed in the shared $runtimesPath/bin venv folder)
+# TODO: Check .NET installed correctly
+# moduleInstallErrors=...

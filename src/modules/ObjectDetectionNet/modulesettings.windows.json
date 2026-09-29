@@ -1,8 +1,0 @@
-{
-  "Modules": {
-    "ObjectDetectionNet": {
-      "Runtime": "execute",
-      "FilePath": "ObjectDetectionNet.exe"
-    }
-  }
-}

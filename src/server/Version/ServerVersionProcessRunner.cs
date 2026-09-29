@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Threading;
 using System.Threading.Tasks;
-using CodeProject.AI.SDK.API;
+
+using CodeProject.AI.SDK.Common;
+
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -33,9 +35,14 @@ namespace CodeProject.AI.Server
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             // Let's make sure the front end is up and running before we start the version process
-            // REVIEW: [Matthew] Is .ConfigureAwait(false) needed here.
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
-
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException)
+            {
+            }
+            
             await CheckCurrentVersionAsync().ConfigureAwait(false);
         }
 
@@ -52,7 +59,7 @@ namespace CodeProject.AI.Server
                     int compare = VersionInfo.Compare(_versionService.VersionConfig.VersionInfo, latest);
                     if (compare < 0)
                     {
-                        if (latest.SecurityUpdate ?? false)
+                        if (latest.SecurityUpdate)
                             _logger.LogInformation($"*** A SECURITY UPDATE {latest.Version} is available");
                         else
                             _logger.LogInformation($"*** A new version {latest.Version} is available");

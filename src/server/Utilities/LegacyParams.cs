@@ -23,19 +23,18 @@ namespace CodeProject.AI.Server
         /// Here's how it works:
         /// 
         /// Environment variables that an analysis module would typically access are set in 
-        /// AiModuleRunner.CreateProcessStartInfo. The values that CreateProcessStartInfo
-        /// gets are from the server's appsettings.json in the EnvironmentVariables section, or
-        /// from the backend analysis module's modulesettings.json file in its
-        /// EnvironmentVariables section. These two sets of variables are combined into one set and
-        /// then used to set the Environment variables for the backend analysis module being
-        /// launched.
+        /// ModuleRunner.CreateProcessStartInfo. The values that CreateProcessStartInfo gets are 
+        /// from the server's appsettings.json in the EnvironmentVariables section, or from the 
+        /// backend analysis module's modulesettings.json file in its EnvironmentVariables section.
+        /// These two sets of variables are combined into one set and then used to set the
+        /// Environment variables for the backend analysis module being launched.
         /// 
         /// To override these values via the command line you just set the value of the environment
         /// variable using its name. The "name" is the tricky bit. In the appsettings.json file you
         /// may have "USE_CUDA" in the EnvironmentVariable section, but its fully qualified name
         /// for the command line would be ServerOptions:EnvironmentVariables:CPAI_PORT. In the
         /// object detection module's variables in modulesettings.json, changing the value USE_CUDA
-        /// requires the command line parameter Modules:ObjectDetectionYolo:EnvironmentVariables:USE_CUDA.
+        /// requires the command line parameter Modules:ObjectDetectionYOLOv5-6.2:EnvironmentVariables:USE_CUDA.
         /// 
         /// So, to override these values at the command line is ludicrously verbose. Instead we
         /// will choose a subset of these variables that we know are in use in the wild and provide
@@ -60,17 +59,18 @@ namespace CodeProject.AI.Server
                 // Activation
                 if (pair.Key.Equals("VISION-FACE", StringComparison.InvariantCultureIgnoreCase) ||
                     pair.Key.Equals("VISION_FACE", StringComparison.InvariantCultureIgnoreCase))
-                    keyValues["Modules:FaceProcessing:EnvironmentVariables:AutoStart"] = pair.Value;
+                    keyValues["Modules:FaceProcessing:LaunchSettings:AutoStart"] = pair.Value;
 
                 if (pair.Key.Equals("VISION-SCENE", StringComparison.InvariantCultureIgnoreCase) ||
                     pair.Key.Equals("VISION_SCENE", StringComparison.InvariantCultureIgnoreCase))
-                    keyValues["Modules:SceneClassification:EnvironmentVariables:AutoStart"] = pair.Value;
+                    keyValues["Modules:SceneClassification:LaunchSettings:AutoStart"] = pair.Value;
 
                 if (pair.Key.Equals("VISION-DETECTION", StringComparison.InvariantCultureIgnoreCase) ||
                     pair.Key.Equals("VISION_DETECTION", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    keyValues["Modules:VisionObjectDetection:EnvironmentVariables:AutoStart"] = pair.Value;
-                    keyValues["Modules:ObjectDetectionYolo:EnvironmentVariables:AutoStart"]   = pair.Value;
+                    keyValues["Modules:ObjectDetectionYOLOv5-3.1:LaunchSettings:AutoStart"] = pair.Value;
+                    keyValues["Modules:ObjectDetectionYOLOv5-6.2:LaunchSettings:AutoStart"] = pair.Value;
+                    keyValues["Modules:ObjectDetectionYOLOv5Net:LaunchSettings:AutoStart"]  = pair.Value;
                 }
 
                 // Mode, which convolutes resolution and model size
@@ -86,8 +86,8 @@ namespace CodeProject.AI.Server
                     else if (pair.Value?.Equals("Low", StringComparison.InvariantCultureIgnoreCase) ?? false)
                         modelSize = "Small";
 
-                    keyValues["Modules:ObjectDetectionYolo:EnvironmentVariables:MODEL_SIZE"] = modelSize;
-                    keyValues["Modules:ObjectDetectionNet:EnvironmentVariables:MODEL_SIZE"]  = modelSize;
+                    keyValues["Modules:ObjectDetectionYOLOv5-6.2:EnvironmentVariables:MODEL_SIZE"] = modelSize;
+                    keyValues["Modules:ObjectDetectionYOLOv5Net:EnvironmentVariables:MODEL_SIZE"]  = modelSize;
                 }
 
                 // Using CUDA?
@@ -97,12 +97,12 @@ namespace CodeProject.AI.Server
                     keyValues["Modules:SceneClassification:EnvironmentVariables:USE_CUDA"]   = pair.Value;
                     keyValues["Modules:VisionObjectDetection:EnvironmentVariables:USE_CUDA"] = pair.Value;
 
-                    keyValues["Modules:ObjectDetectionNet:EnvironmentVariables:USE_CUDA"]  = pair.Value;
-                    keyValues["Modules:ObjectDetectionYolo:EnvironmentVariables:USE_CUDA"] = pair.Value;
+                    keyValues["Modules:ObjectDetectionYOLOv5Net:EnvironmentVariables:USE_CUDA"]  = pair.Value;
+                    keyValues["Modules:ObjectDetectionYOLOv5-6.2:EnvironmentVariables:USE_CUDA"] = pair.Value;
 
-                    keyValues["Modules:ObjectDetectionNet:EnvironmentVariables:CPAI_MODULE_SUPPORT_GPU"]    = pair.Value;
-                    keyValues["Modules:ObjectDetectionYolo:EnvironmentVariables:CPAI_MODULE_SUPPORT_GPU"]   = pair.Value;
-                    keyValues["Modules:VisionObjectDetection:EnvironmentVariables:CPAI_MODULE_SUPPORT_GPU"] = pair.Value;
+                    keyValues["Modules:ObjectDetectionYOLOv5Net:EnvironmentVariables:CPAI_MODULE_ENABLE_GPU"]    = pair.Value;
+                    keyValues["Modules:ObjectDetectionYOLOv5-6.2:EnvironmentVariables:CPAI_MODULE_ENABLE_GPU"]   = pair.Value;
+                    keyValues["Modules:VisionObjectDetection:EnvironmentVariables:CPAI_MODULE_ENABLE_GPU"] = pair.Value;
                 }
 
                 // Model Directories
@@ -117,7 +117,7 @@ namespace CodeProject.AI.Server
                 // Custom Model Directories. Deepstack compatibility and thge docs are ambiguous
                 if (pair.Key.Equals("MODELSTORE-DETECTION", StringComparison.InvariantCultureIgnoreCase) ||
                     pair.Key.Equals("MODELSTORE_DETECTION", StringComparison.InvariantCultureIgnoreCase))
-                    keyValues["Modules:ObjectDetectionYolo:EnvironmentVariables:CUSTOM_MODELS_DIR"] = pair.Value;
+                    keyValues["Modules:ObjectDetectionYOLOv5-6.2:EnvironmentVariables:CUSTOM_MODELS_DIR"] = pair.Value;
 
                 // Temp Directories
                 if (pair.Key.Equals("TEMP_PATH", StringComparison.InvariantCultureIgnoreCase))
@@ -131,38 +131,31 @@ namespace CodeProject.AI.Server
 
         /// <summary>
         /// <para>This is as bad as the method above. Instead of handling command line parameters,
-        /// this method takes a section JSON object that contains settings for one or modules, plus
-        /// global overrides, in a format like</para>
+        /// this method takes a section JSON object that contains settings for one or more modules
+        /// in a format like</para>
         /// <example>
         /// {
-        ///     "Global":{
-        ///         "USE_CUDA" : "True"
-        ///     },
-        ///     "Objectdetectionyolo": {
-        ///         "CUSTOM_MODELS_DIR" : "C:\BlueIRis\AI",
-        ///         "MODEL_SIZE" : "Large"
+        ///     "ObjectDetectionYOLOv5-6.2": {
+        ///         EnableGpu: "True"
         ///     },
         ///     "FaceProcessing": {
         ///         "AutoStart" : "False"
         ///     }
         /// }
         ///</example>
-        /// <para>This method only receives the "Global" section, not the modules section.</para>
-        /// <para>Each value in the Global section is hardcode-mapped to module-specific values
-        /// exactly like in <see cref="PassThroughLegacyCommandLineParams"/>. We update module 
-        /// settings in-memory so that the server can immediately restart the module with the
-        /// updated settings without needing to reload settings, and we also update the
-        /// overrideSettings JsonObject which contains the set of current override settings. 
+        /// <para>We update module settings in-memory so that the server can immediately restart the
+        /// module with the updated settings without needing to reload settings, and we also update
+        /// the overrideSettings JsonObject which contains the set of current override settings. 
         /// These settings are stored in a JSON file and reloaded when the server reloads, meaning
         /// the changes we've made will be persisted (and will override the settings in the
         /// modulesettings.json files for each module).</para>
         /// </summary>
         /// <param name="newSettings">The new settings to apply</param>
-        /// <param name="modules">The set of modules running</param>
+        /// <param name="installedModules">The set of installed modules</param>
         /// <param name="overrideSettings">The collection of override settings to be persisted</param>
         /// <returns>A list of module IOs that were updated (and hence may need restarting)</returns>
         public static List<string> UpdateSettings(Dictionary<string, string> newSettings,
-                                                  ModuleCollection modules,
+                                                  ModuleCollection installedModules,
                                                   JsonObject? overrideSettings)
         {
             List<string> modulesUpdated = new();
@@ -172,9 +165,9 @@ namespace CodeProject.AI.Server
                 // Port.
                 if (setting.Key.Equals("PORT", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    foreach (var entry in modules)
+                    foreach (var entry in installedModules)
                     {
-                        MakeSettingUpdate(modules, overrideSettings, entry.Key,
+                        MakeSettingUpdate(installedModules, overrideSettings, entry.Key,
                                           "CPAI_PORT", setting.Value, modulesUpdated);
                     }
                 }
@@ -183,30 +176,30 @@ namespace CodeProject.AI.Server
                 if (setting.Key.Equals("VISION-DETECTION", StringComparison.InvariantCultureIgnoreCase) ||
                     setting.Key.Equals("VISION_DETECTION", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionYolo",
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-6.2",
                                       "AutoStart", setting.Value, modulesUpdated);
-                    // MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionNet",
+                    // MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionYOLOv5Net",
                     //                  "AutoStart", setting.Value, modulesUpdated);
                 }
                 if (setting.Key.Equals("VISION-FACE", StringComparison.InvariantCultureIgnoreCase) ||
                     setting.Key.Equals("VISION_FACE", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    MakeSettingUpdate(modules, overrideSettings, "FaceProcessing",
+                    MakeSettingUpdate(installedModules, overrideSettings, "FaceProcessing",
                                       "AutoStart", setting.Value, modulesUpdated);
                 }
                 if (setting.Key.Equals("VISION-SCENE", StringComparison.InvariantCultureIgnoreCase) ||
                     setting.Key.Equals("VISION_SCENE", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    MakeSettingUpdate(modules, overrideSettings, "SceneClassification",
+                    MakeSettingUpdate(installedModules, overrideSettings, "SceneClassification",
                                       "AutoStart", setting.Value, modulesUpdated);
                 }
 
                 // Mode, which is effectively model size
                 if (setting.Key.Equals("MODE", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    MakeSettingUpdate(modules, overrideSettings, "FaceProcessing",
+                    MakeSettingUpdate(installedModules, overrideSettings, "FaceProcessing",
                                       "MODE", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "SceneClassification",
+                    MakeSettingUpdate(installedModules, overrideSettings, "SceneClassification",
                                       "MODE", setting.Value, modulesUpdated);
 
                     string modelSize = "Medium";
@@ -215,54 +208,54 @@ namespace CodeProject.AI.Server
                     else if (setting.Value.Equals("Low", StringComparison.InvariantCultureIgnoreCase))
                         modelSize = "Small";
 
-                    MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionYolo",
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-6.2",
                                       "MODEL_SIZE", modelSize, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionNet",
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5Net",
                                       "MODEL_SIZE", modelSize, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "YOLOv5-3.1",
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-3.1",
                                       "MODEL_SIZE", modelSize, modulesUpdated);
                 }
 
                 // Using CUDA?
                 if (setting.Key.Equals("CUDA_MODE", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    MakeSettingUpdate(modules, overrideSettings, "FaceProcessing",
+                    MakeSettingUpdate(installedModules, overrideSettings, "FaceProcessing",
                                       "USE_CUDA", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "SceneClassification",
-                                      "USE_CUDA", setting.Value, modulesUpdated);
-
-                    MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionYolo",
-                                      "USE_CUDA", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionNet",
-                                      "USE_CUDA", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "YOLOv5-3.1",
+                    MakeSettingUpdate(installedModules, overrideSettings, "SceneClassification",
                                       "USE_CUDA", setting.Value, modulesUpdated);
 
-                    MakeSettingUpdate(modules, overrideSettings, "FaceProcessing",
-                                      "CPAI_MODULE_SUPPORT_GPU", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "SceneClassification",
-                                      "CPAI_MODULE_SUPPORT_GPU", setting.Value, modulesUpdated);
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-6.2",
+                                      "USE_CUDA", setting.Value, modulesUpdated);
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5Net",
+                                      "USE_CUDA", setting.Value, modulesUpdated);
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-3.1",
+                                      "USE_CUDA", setting.Value, modulesUpdated);
 
-                    MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionYolo",
-                                      "CPAI_MODULE_SUPPORT_GPU", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionNet",
-                                      "CPAI_MODULE_SUPPORT_GPU", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "YOLOv5-3.1",
-                                      "CPAI_MODULE_SUPPORT_GPU", setting.Value, modulesUpdated);
+                    MakeSettingUpdate(installedModules, overrideSettings, "FaceProcessing",
+                                      "CPAI_MODULE_ENABLE_GPU", setting.Value, modulesUpdated);
+                    MakeSettingUpdate(installedModules, overrideSettings, "SceneClassification",
+                                      "CPAI_MODULE_ENABLE_GPU", setting.Value, modulesUpdated);
+
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-6.2",
+                                      "CPAI_MODULE_ENABLE_GPU", setting.Value, modulesUpdated);
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5Net",
+                                      "CPAI_MODULE_ENABLE_GPU", setting.Value, modulesUpdated);
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-3.1",
+                                      "CPAI_MODULE_ENABLE_GPU", setting.Value, modulesUpdated);
                 }
 
                 // Model Directories
                 if (setting.Key.Equals("DATA_DIR", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    MakeSettingUpdate(modules, overrideSettings, "VisionObjectDetection",
+                    MakeSettingUpdate(installedModules, overrideSettings, "VisionObjectDetection",
                                       "DATA_DIR", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "FaceProcessing",
+                    MakeSettingUpdate(installedModules, overrideSettings, "FaceProcessing",
                                       "DATA_DIR", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "SceneClassification",
+                    MakeSettingUpdate(installedModules, overrideSettings, "SceneClassification",
                                       "DATA_DIR", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionYolo",
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-6.2",
                                       "DATA_DIR", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "YOLOv5-3.1",
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-3.1",
                                       "DATA_DIR", setting.Value, modulesUpdated);
                 }
 
@@ -270,9 +263,9 @@ namespace CodeProject.AI.Server
                 if (setting.Key.Equals("MODELSTORE-DETECTION", StringComparison.InvariantCultureIgnoreCase) ||
                     setting.Key.Equals("MODELSTORE_DETECTION", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    MakeSettingUpdate(modules, overrideSettings, "VisionObjectDetection",
+                    MakeSettingUpdate(installedModules, overrideSettings, "VisionObjectDetection",
                                       "MODELSTORE_DETECTION", setting.Value, modulesUpdated);
-                    MakeSettingUpdate(modules, overrideSettings, "ObjectDetectionYolo",
+                    MakeSettingUpdate(installedModules, overrideSettings, "ObjectDetectionYOLOv5-6.2",
                                       "CUSTOM_MODELS_DIR", setting.Value, modulesUpdated);
                 }
             }
@@ -280,11 +273,12 @@ namespace CodeProject.AI.Server
             return modulesUpdated;
         }
 
-        private static void MakeSettingUpdate(ModuleCollection modules, JsonObject? overrideSettings,
-                                              string moduleId, string settingName, string settingValue,
+        private static void MakeSettingUpdate(ModuleCollection installedModules,
+                                              JsonObject? overrideSettings, string moduleId,
+                                              string settingName, string settingValue,
                                               List<string> modulesUpdated)
         {
-            ModuleConfig? module = modules.GetModule(moduleId);
+            ModuleConfig? module = installedModules.GetModule(moduleId);
             if (module is null || string.IsNullOrWhiteSpace(module.ModuleId))
                 return;
 

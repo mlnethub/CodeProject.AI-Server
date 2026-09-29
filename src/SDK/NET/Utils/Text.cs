@@ -1,4 +1,7 @@
-﻿using System.Text.RegularExpressions;
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.RegularExpressions;
 
 namespace CodeProject.AI.SDK.Utils
 {
@@ -47,7 +50,7 @@ namespace CodeProject.AI.SDK.Utils
         /// <param name="source">This string</param>
         /// <param name="str">The string to test</param>
         /// <returns>True if source starts with str (including null == null), false otherwise</returns>
-        public static bool StartsWithIgnoreCase(this string? source, string str)
+        public static bool StartsWithIgnoreCase(this string? source, string? str)
         {
             if (source is null)
                 return str is null;

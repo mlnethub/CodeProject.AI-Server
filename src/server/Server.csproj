@@ -15,20 +15,17 @@ https://learn.microsoft.com/en-us/visualstudio/msbuild/property-functions?view=v
 		<Description>CodeProject.AI API Server provides a plug-in API for hosting AI inference and training modules, accessible via any language, any platform.</Description>
 		<Company>CodeProject</Company>
 		<Authors>CodeProject</Authors>
-		<Version>2.2.4</Version>
+		<Version>2.7.0</Version>
 	</PropertyGroup>
 
 	<!-- Build properties -->
 	<PropertyGroup>
 		<RootNamespace>CodeProject.AI.Server</RootNamespace>
 		<AssemblyName>CodeProject.AI.Server</AssemblyName>
-		<ImplicitUsings>disable</ImplicitUsings>
-		<Nullable>enable</Nullable>
 		<UserSecretsId>14515168-17dd-49db-9023-0749bb408a37</UserSecretsId>
 		<ApplicationIcon>favicon.ico</ApplicationIcon>
 		<GenerateDocumentationFile>True</GenerateDocumentationFile>
 		<Platform>AnyCPU</Platform>
-		<TargetFramework>net7.0</TargetFramework>
 		<AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
 		<ErrorOnDuplicatePublishOutputFiles>false</ErrorOnDuplicatePublishOutputFiles>
 		<DeleteExistingFiles>true</DeleteExistingFiles>
@@ -43,7 +40,7 @@ https://learn.microsoft.com/en-us/visualstudio/msbuild/property-functions?view=v
 	<!-- Package properties -->
 	<PropertyGroup>
 		<PackageLicenseExpression>SSPL-1.0</PackageLicenseExpression>
-		<PackageProjectUrl>https://www.codeproject.com/ai</PackageProjectUrl>
+		<PackageProjectUrl>https://codeproject.github.io/codeproject.ai</PackageProjectUrl>
 		<PackageIcon>codeproject125x125.png</PackageIcon>
 	</PropertyGroup>
 
@@ -77,24 +74,37 @@ https://learn.microsoft.com/en-us/visualstudio/msbuild/property-functions?view=v
 	</PropertyGroup>
 
 	<ItemGroup>
-		<Compile Remove="Controllers\TextController.cs" />
-		<Compile Remove="Controllers\VisionController.cs" />
-	</ItemGroup>
-
-	<ItemGroup>
 		<Content Remove="installconfig.json" />
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="7.0.0" />
-		<PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="7.0.0" />
-		<PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.17.0" />
-		<PackageReference Include="Swashbuckle.AspNetCore" Version="6.4.0" />
-		<PackageReference Include="System.Diagnostics.PerformanceCounter" Version="7.0.0" />
+	  <ProjectReference Include="..\SDK\NET\NET.csproj" />
+	  <!-- PackageReference Include="CodeProject.AI.Module.SDK" Version="1.1.0" /> -->
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(IsOsx)'=='true' And '$(IsArm64)'=='true'">   <!-- Mac Apple Silicon -->
+		<PackageReference Include="System.Diagnostics.PerformanceCounter"        Version="9.0.0" />
+		<PackageReference Include="System.Text.Json"                             Version="9.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Hosting.Systemd"         Version="9.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Logging"                 Version="9.0.0" />
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(IsOsx)'!='true' Or '$(IsArm64)'!='true'">      <!-- Everything else -->
+		<PackageReference Include="System.Diagnostics.PerformanceCounter"        Version="9.0.0" />
+		<PackageReference Include="System.Text.Json"                             Version="9.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Hosting.Systemd"         Version="9.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Logging"                 Version="9.0.0" />
 	</ItemGroup>
 
 	<ItemGroup>
-	  <ProjectReference Include="..\SDK\NET\NET.csproj" />
+		<PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.21.0" />
+		<!--
+		Removing for now: This causes errors when building multi-platform:
+		https://github.com/domaindrivendev/Swashbuckle.WebApi/issues/1358
+		<PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
+		-->
 	</ItemGroup>
 
 	<ItemGroup>
@@ -119,10 +129,13 @@ https://learn.microsoft.com/en-us/visualstudio/msbuild/property-functions?view=v
 		<Content Update="wwwroot\assets\codeprojectAI-white.svg">
 		  <CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</Content>
-		<Content Update="wwwroot\assets\dashboard.css">
+		<Content Update="wwwroot\assets\server.css">
 		  <CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</Content>
 		<Content Update="wwwroot\assets\dashboard.js">
+		  <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+		</Content>
+		<Content Update="wwwroot\assets\explorer.js">
 		  <CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</Content>
 		<Content Update="wwwroot\assets\favicon-16x16.png">
@@ -140,6 +153,12 @@ https://learn.microsoft.com/en-us/visualstudio/msbuild/property-functions?view=v
 		<Content Update="wwwroot\assets\senseAI.svg">
 		  <CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</Content>
+		<Content Update="wwwroot\assets\server.css">
+		  <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+		</Content>
+		<Content Update="wwwroot\assets\server.js">
+		  <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+		</Content>
 		<Content Update="wwwroot\assets\styles.css">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</Content>
@@ -149,7 +168,7 @@ https://learn.microsoft.com/en-us/visualstudio/msbuild/property-functions?view=v
 		<Content Update="wwwroot\index.html">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</Content>
-		<Content Update="wwwroot\vision.html">
+		<Content Update="wwwroot\explorer.html">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</Content>
 	</ItemGroup>
@@ -164,12 +183,16 @@ https://learn.microsoft.com/en-us/visualstudio/msbuild/property-functions?view=v
 		</None>
 	</ItemGroup>
 
+	<!--
+	Start/End timer scripts use powershell to set a persistent environment variable and this
+	single operation takes seconds. Not worth it.
+
 	<Target Name="PreBuild" BeforeTargets="PreBuildEvent" Condition="'$(IsWindows)'=='true'">
-		<Exec Command="call ..\SDK\Scripts\starttimer.bat $(ProjectName)" />
+		<Exec Command="call ..\SDK\Utilities\starttimer.bat $(ProjectName)" />
 	</Target>
 
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(IsWindows)'=='true'">
-		<Exec Command="call ..\SDK\Scripts\endtimer.bat $(ProjectName)" />
+		<Exec Command="call ..\SDK\Utilities\endtimer.bat $(ProjectName)" />
 	</Target>
-
+	-->
 </Project>

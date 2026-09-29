@@ -1,8 +1,0 @@
-{
-  "Modules": {
-    "SentimentAnalysis": {
-      "Runtime": "dotnet",
-      "FilePath": "SentimentAnalysis.dll"
-    }
-  }
-}

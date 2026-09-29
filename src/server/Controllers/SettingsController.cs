@@ -9,6 +9,7 @@ using CodeProject.AI.Server.Modules;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace CodeProject.AI.Server.Controllers
@@ -39,10 +40,7 @@ namespace CodeProject.AI.Server.Controllers
     /// </remarks>
     /// <example>
     /// {
-    ///     "Global":{
-    ///         "USE_CUDA" : "True"
-    ///     },
-    ///     "Objectdetectionyolo": {
+    ///     "ObjectDetectionYOLOv5-6.2": {
     ///         "CUSTOM_MODELS_DIR" : "C:\\BlueIris\\AI",
     ///         "MODEL_SIZE" : "Large"
     ///     },
@@ -57,16 +55,18 @@ namespace CodeProject.AI.Server.Controllers
     /// <summary>
     /// For updating the settings on the server and modules.
     /// </summary>
-    [Route("v1/settings")]
+    [Route("v1/settings")]          // legacy route
+    [Route("v1/server/settings")]   // new route as of 2.4.0
     [ApiController]
     public class SettingsController : ControllerBase
     {
         private readonly IConfiguration        _config;
         private readonly ServerOptions         _serverOptions;
         private readonly ModuleSettings        _moduleSettings;
-        private readonly ModuleCollection      _moduleCollection;
+        private readonly ModuleCollection      _installedModules;
         private readonly ModuleProcessServices _moduleProcessServices;
         private readonly string                _storagePath;
+        private readonly ILogger               _logger;
 
         /// <summary>
         /// Constructor
@@ -74,47 +74,53 @@ namespace CodeProject.AI.Server.Controllers
         /// <param name="config">The configuration</param>
         /// <param name="serverOptions">The server options</param>
         /// <param name="moduleSettings">The moduleSettings.</param>
-        /// <param name="moduleCollection">The collection of modules.</param>
+        /// <param name="moduleCollectionOptions">The collection of modules.</param>
         /// <param name="moduleProcessServices">The Module Process Services.</param>
+        /// <param name="logger">The logger</param>
         public SettingsController(IConfiguration config,
                                   IOptions<ServerOptions> serverOptions,
                                   ModuleSettings moduleSettings,
-                                  IOptions<ModuleCollection> moduleCollection,
-                                  ModuleProcessServices moduleProcessServices)
+                                  IOptions<ModuleCollection> moduleCollectionOptions,
+                                  ModuleProcessServices moduleProcessServices,
+                                  ILogger<LogController> logger)
         {
             _config                = config;
             _serverOptions         = serverOptions.Value;
             _moduleSettings        = moduleSettings;
-            _moduleCollection      = moduleCollection.Value;
+            _installedModules      = moduleCollectionOptions.Value;
             _moduleProcessServices = moduleProcessServices;
             _storagePath           = _config["ApplicationDataDir"] 
                                    ?? throw new ApplicationException("ApplicationDataDir is not defined in configuration");
+            _logger                = logger;
         }
 
         /// <summary>
         /// Manages requests to add / update a single setting for a specific module.
         /// </summary>
-        /// <returns>A Response Object.</returns>
-        [HttpPost("{moduleId}", Name = "UpsertSetting")]
+        /// <returns>A <see cref="ServerResponse"/> Object.</returns>
+        [HttpPost("{moduleId}" /*, Name = "UpsertSetting"*/)]
         [Produces("application/json")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
-        public async Task<ResponseBase> UpsertSettingAsync(string moduleId, [FromForm] string name, 
-                                                           [FromForm] string value)
+        public async Task<ServerResponse> UpsertSettingAsync(string moduleId,
+                                                             [FromForm] string name, 
+                                                             [FromForm] string value)
         {
             if (string.IsNullOrWhiteSpace(moduleId))
-                return new ErrorResponse("No module ID provided");
+                return new ServerErrorResponse("No module ID provided");
+
+            _logger.LogInformation($"Update {moduleId}. Setting {name}={value}");
 
             // We've been toggling between passing a name/value structure, and passing individual
             // params. This just normalises it and helps us switch between the two modes until we
             // settle on one.
             var settings = new SettingsPair() { Name = name, Value = value };
             if (settings == null || string.IsNullOrWhiteSpace(settings.Name))
-               return new ErrorResponse("No setting or setting name provided");
+               return new ServerErrorResponse("No setting or setting name provided");
 
-            ModuleConfig? module = _moduleCollection.GetModule(moduleId);
+            ModuleConfig? module = _installedModules.GetModule(moduleId);
             if (module is null)
-                return new ErrorResponse($"No module with ID {moduleId} found");
+                return new ServerErrorResponse($"No module with ID {moduleId} found");
 
             bool success = false;
 
@@ -128,44 +134,49 @@ namespace CodeProject.AI.Server.Controllers
                 // Make the change to the module's settings
                 module.UpsertSetting(settings.Name, settings.Value);
 
+                if (settings.Name.EqualsIgnoreCase("AutoStart") && settings.Value.EqualsIgnoreCase("false"))
+                    _logger.LogInformation($"*** Stopping {module.Name}");
+                else
+                    _logger.LogInformation($"*** Restarting {module.Name} to apply settings change");
+
                 // Restart the module and persist the settings
                 if (await _moduleProcessServices.RestartProcess(module).ConfigureAwait(false))
                 {
                     var settingStore = new PersistedOverrideSettings(_storagePath);
-                    var overrideSettings = await settingStore.LoadSettings().ConfigureAwait(false);
+                    var currentUserSettings = await settingStore.LoadSettings().ConfigureAwait(false);
 
-                    if (ModuleConfigExtensions.UpsertSettings(overrideSettings, module.ModuleId!,
+                    if (ModuleConfigExtensions.UpsertSettings(currentUserSettings, module.ModuleId!,
                                                               settings.Name, settings.Value))
                     {
-                        success = await settingStore.SaveSettingsAsync(overrideSettings)
+                        success = await settingStore.SaveSettingsAsync(currentUserSettings)
                                                     .ConfigureAwait(false);
                     }
                 }
             }
 
-            return new ResponseBase { success = success };
+            return new ServerResponse { Success = success };
         }
 
         /// <summary>
         /// Manages requests to add / update settings for one or more modules.
         /// </summary>
-        /// <returns>A Response Object.</returns>
-        [HttpPost("", Name = "UpsertSettings")]
+        /// <returns>A <see cref="ServerResponse"/> Object.</returns>
+        [HttpPost("" /*, Name = "UpsertSettings"*/)]
         [Produces("application/json")]
         //[Consumes("application/json")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
-        public async Task<ResponseBase> UpsertSettingsAsync([FromBody] SettingsDict settings)
+        public async Task<ServerResponse> UpsertSettingsAsync([FromBody] SettingsDict settings)
         {
             if (!settings.Any())
-                return new ErrorResponse("No settings provided");
+                return new ServerErrorResponse("No settings provided");
 
             bool restartSuccess = true;
 
             // Load up the current persisted settings so we can update and re-save them
 
             var settingStore = new PersistedOverrideSettings(_storagePath);
-            var overrideSettings = await settingStore.LoadSettings().ConfigureAwait(false);
+            var currentUserSettings = await settingStore.LoadSettings().ConfigureAwait(false);
 
             // Keep tabs on which modules need to be restarted
             List<string>? moduleIdsToRestart = new();
@@ -180,14 +191,14 @@ namespace CodeProject.AI.Server.Controllers
                     // Update all settings based on what's in the global settings. We'll get back a
                     // list of affected modules that need restarting.
                     Dictionary<string, string> globalSettings = moduleSetting.Value;
-                    moduleIdsToRestart = LegacyParams.UpdateSettings(globalSettings, _moduleCollection,
-                                                                     overrideSettings);
+                    moduleIdsToRestart = LegacyParams.UpdateSettings(globalSettings, _installedModules,
+                                                                     currentUserSettings);
 
                     continue;
                 }
 
                 // Targeting a specific module
-                ModuleConfig? module = _moduleCollection.GetModule(moduleId);
+                ModuleConfig? module = _installedModules.GetModule(moduleId);
                 if (module is null)
                     continue;
 
@@ -198,7 +209,7 @@ namespace CodeProject.AI.Server.Controllers
 
                     // Add this setting to the persisted override settings (settings will maintain
                     // after server restart)
-                    ModuleConfigExtensions.UpsertSettings(overrideSettings, module.ModuleId!,
+                    ModuleConfigExtensions.UpsertSettings(currentUserSettings, module.ModuleId!,
                                                           setting.Key, setting.Value);
                 }
 
@@ -209,7 +220,7 @@ namespace CodeProject.AI.Server.Controllers
             // Restart the modules that were updated
             foreach (string moduleId in moduleIdsToRestart)
             {
-                ModuleConfig? module = _moduleCollection.GetModule(moduleId);
+                ModuleConfig? module = _installedModules.GetModule(moduleId);
                 if (module is not null)
                 {
                     var restartTask = _moduleProcessServices.RestartProcess(module);
@@ -218,10 +229,10 @@ namespace CodeProject.AI.Server.Controllers
             }
 
             // Only persist these override settings if all modules restarted successfully
-            bool success = restartSuccess && await settingStore.SaveSettingsAsync(overrideSettings)
+            bool success = restartSuccess && await settingStore.SaveSettingsAsync(currentUserSettings)
                                                                .ConfigureAwait(false);
 
-            return new ResponseBase { success = success };
+            return new ServerResponse { Success = success };
         }
 
         /// <summary>
@@ -231,19 +242,19 @@ namespace CodeProject.AI.Server.Controllers
         /// <returns>A list of settings.</returns>
         /// <response code="200">Returns the list of detected object information, if any.</response>
         /// <response code="400"></response>            
-        [HttpGet("{moduleId}", Name = "List Settings")]
+        [HttpGet("{moduleId}" /*, , Name = "List Settings"*/)]
         [Consumes("multipart/form-data")]
         [Produces("application/json")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
-        public ResponseBase ListSettings(string? moduleId)
+        public ServerResponse ListSettings(string? moduleId)
         {
             if (string.IsNullOrWhiteSpace(moduleId))
-                return new ErrorResponse("No module ID provided");
+                return new ServerErrorResponse("No module ID provided");
 
-            ModuleConfig? module = _moduleCollection.GetModule(moduleId);
+            ModuleConfig? module = _installedModules.GetModule(moduleId);
             if (module is null)
-                return new ErrorResponse($"No module found with ID {moduleId}");
+                return new ServerErrorResponse($"No module found with ID {moduleId}");
 
             Dictionary<string, string?> processEnvironmentVars = new();
             _serverOptions.AddEnvironmentVariables(processEnvironmentVars);
@@ -255,17 +266,19 @@ namespace CodeProject.AI.Server.Controllers
 
             var response = new SettingsResponse
             {
-                success  = true,
-                settings = new
+                Success  = true,
+                Settings = new
                 {
-                    autostart          = module.AutoStart ?? false,
-                    supportGPU         = module.SupportGPU,
-                    logVerbosity       = module.LogVerbosity,
-                    halfPrecision      = module.HalfPrecision,
-                    parallelism        = module.Parallelism,
-                    postStartPauseSecs = module.PostStartPauseSecs
+                    Autostart             = module.LaunchSettings!.AutoStart ?? false,
+                    LogVerbosity          = module.LaunchSettings!.LogVerbosity,
+                    PostStartPauseSecs    = module.LaunchSettings!.PostStartPauseSecs,
+                    Parallelism           = module.LaunchSettings?.Parallelism,
+                    InstallGPU            = module.GpuOptions?.InstallGPU,
+                    EnableGPU             = module.GpuOptions?.EnableGPU,
+                    AcceleratorDeviceName = module.GpuOptions?.AcceleratorDeviceName,
+                    HalfPrecision         = module.GpuOptions?.HalfPrecision
                 },
-                environmentVariables = processEnvironmentVars
+                EnvironmentVariables = processEnvironmentVars
             };
 
             return response;

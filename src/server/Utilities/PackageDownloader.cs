@@ -53,11 +53,20 @@ namespace CodeProject.AI.Server.Utilities
                 uri = uri.Substring("file://".Length);
                 if (SystemInfo.IsWindows)
                 {
-                    if (uri.StartsWith("/"))
-                        uri = "C:" + uri;
+                    if (uri.StartsWith("/"))    // url = "file:///Program Files\\CodeProject\\..."
+                    {
+                        string drive = Directory.GetCurrentDirectory().Split('\\')[0];
+                        uri = drive + uri;
+                    }
                 }
-                else if (uri.StartsWithIgnoreCase("c:\\"))
-                    uri = uri.Substring("c:".Length);
+                else 
+                {
+                    // HACK
+                    if (uri.StartsWithIgnoreCase("c:\\"))
+                        uri = "/" + uri.Substring("c:\\".Length);
+                    else if (uri.StartsWithIgnoreCase("d:\\"))
+                        uri = "/" + uri.Substring("d:\\".Length);
+                }
 
                 uri = Text.FixSlashes(uri);
                 return await File.ReadAllTextAsync(uri).ConfigureAwait(false);
@@ -74,9 +83,11 @@ namespace CodeProject.AI.Server.Utilities
         /// </summary>
         /// <param name="uri">The location of the download</param>
         /// <param name="outputPath">Where to write the output</param>
+        /// <param name="overwrite">If true, overwrite a file if it already exists</param>
         /// <exception cref="InvalidOperationException"></exception>
         /// <exception cref="FileNotFoundException"></exception>
-        public async Task<(bool, string)> DownloadFileAsync(string uri, string outputPath)
+        public async Task<(bool, string)> DownloadFileAsync(string uri, string outputPath,
+                                                            bool overwrite = true)
         {
             string error = string.Empty;
 
@@ -84,6 +95,25 @@ namespace CodeProject.AI.Server.Utilities
             {
                 error = $"{nameof(uri)} is null or empty.";
                 throw new ArgumentOutOfRangeException(error);
+            }
+
+            if (!overwrite && File.Exists(outputPath))
+                return (false, $"File '{outputPath}' exists. Delete first, or set overwrite = true");
+
+            // HACK to prevent us copying files over one another in file: mode
+            if (uri.StartsWithIgnoreCase("file://"))
+            {
+                string localUrlfilename = uri.Substring(7);
+                localUrlfilename = Text.FixSlashes(localUrlfilename);
+
+                if (!File.Exists(localUrlfilename))
+                    return (false, $"File '{localUrlfilename}' does not exist");
+
+                File.Copy(localUrlfilename, outputPath);
+                if (File.Exists(outputPath))
+                    return (true, error);
+
+                return (false, "Unable to copy file to destination");
             }
 
             if (!Uri.TryCreate(uri, UriKind.Absolute, out _))
@@ -106,7 +136,7 @@ namespace CodeProject.AI.Server.Utilities
             catch (Exception e)
             {
                 error = e.Message;
-                Debug.WriteLine(e);
+                Debug.WriteLine("Error downloading file: " + error);
             }
 
             return (false, error);
@@ -153,7 +183,7 @@ namespace CodeProject.AI.Server.Utilities
             }
             catch (Exception e)
             {
-                Console.WriteLine(e.Message);
+                Console.WriteLine("Error extracting file: " + e.Message);
                 result = false;
             }
 
